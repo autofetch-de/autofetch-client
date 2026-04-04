@@ -1,0 +1,370 @@
+name: Build client
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-headless:
+    name: headless-${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runs_on: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            goarm: ""
+            ext: ""
+          - name: linux-arm64
+            runs_on: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            goarm: ""
+            ext: ""
+          - name: linux-armv7
+            runs_on: ubuntu-latest
+            goos: linux
+            goarch: arm
+            goarm: "7"
+            ext: ""
+          - name: windows-amd64
+            runs_on: windows-latest
+            goos: windows
+            goarch: amd64
+            goarm: ""
+            ext: ".exe"
+          - name: windows-386
+            runs_on: windows-latest
+            goos: windows
+            goarch: "386"
+            goarm: ""
+            ext: ".exe"
+          - name: macos-intel
+            runs_on: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            goarm: ""
+            ext: ""
+          - name: macos-arm64
+            runs_on: macos-latest
+            goos: darwin
+            goarch: arm64
+            goarm: ""
+            ext: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Prepare output dir
+        shell: bash
+        run: |
+          mkdir -p dist/${{ matrix.name }}
+
+      - name: Build headless
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          LDFLAGS="-s -w -X main.Version=${VERSION}"
+
+          export CGO_ENABLED=0
+          export GOOS="${{ matrix.goos }}"
+          export GOARCH="${{ matrix.goarch }}"
+          if [ -n "${{ matrix.goarm }}" ]; then
+            export GOARM="${{ matrix.goarm }}"
+          fi
+
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/${{ matrix.name }}/autofetch${{ matrix.ext }}" \
+            ./cmd/autofetch
+
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          cd "dist/${{ matrix.name }}"
+          for f in *; do
+            [ -f "$f" ] || continue
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$f" > "$f.sha256"
+            else
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: headless-${{ matrix.name }}
+          path: dist/${{ matrix.name }}/
+
+  build-gui-linux:
+    name: gui-linux-amd64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            pkg-config \
+            libgl1-mesa-dev \
+            xorg-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxi-dev \
+            libxxf86vm-dev \
+            libasound2-dev \
+            mesa-common-dev
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Prepare output dir
+        run: mkdir -p dist/linux-amd64-gui
+
+      - name: Build GUI
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          LDFLAGS="-s -w -X main.Version=${VERSION}"
+
+          export CGO_ENABLED=1
+          export GOOS=linux
+          export GOARCH=amd64
+
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/linux-amd64-gui/autofetch-gui" \
+            ./cmd/autofetch-gui
+
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          cd dist/linux-amd64-gui
+          sha256sum autofetch-gui > autofetch-gui.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-amd64
+          path: dist/linux-amd64-gui/
+
+  build-gui-windows:
+    name: gui-windows-amd64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkg-config
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        shell: bash
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Prepare output dir
+        shell: bash
+        run: mkdir -p dist/windows-amd64-gui
+
+      - name: Build GUI
+        shell: bash
+        env:
+          CC: x86_64-w64-mingw32-gcc
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          LDFLAGS="-s -w -X main.Version=${VERSION}"
+
+          export CGO_ENABLED=1
+          export GOOS=windows
+          export GOARCH=amd64
+
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/windows-amd64-gui/autofetch-gui.exe" \
+            ./cmd/autofetch-gui
+
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          cd dist/windows-amd64-gui
+          certutil -hashfile autofetch-gui.exe SHA256 | sed -n '2p' | tr -d ' \r' | awk '{print tolower($0) "  autofetch-gui.exe"}' > autofetch-gui.exe.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows-amd64
+          path: dist/windows-amd64-gui/
+
+  build-gui-macos-intel:
+    name: gui-macos-intel
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Fyne CLI
+        run: go install fyne.io/tools/cmd/fyne@latest
+
+      - name: Download modules
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Prepare output dir
+        run: mkdir -p dist/macos-intel-gui
+
+      - name: Build GUI binary
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          LDFLAGS="-s -w -X main.Version=${VERSION}"
+
+          export CGO_ENABLED=1
+          export GOOS=darwin
+          export GOARCH=amd64
+
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/macos-intel-gui/autofetch-gui" \
+            ./cmd/autofetch-gui
+
+      - name: Package .app
+        shell: bash
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+
+          cd cmd/autofetch-gui
+          if [ -f ../../Icon.png ]; then
+            fyne package -os darwin -name autofetch -release -icon ../../Icon.png
+          else
+            fyne package -os darwin -name autofetch -release
+          fi
+
+          mv autofetch.app ../../dist/macos-intel-gui/autofetch.app
+          cd ../../dist/macos-intel-gui
+          ditto -c -k --sequesterRsrc --keepParent autofetch.app autofetch-macos-intel-app.zip
+
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          cd dist/macos-intel-gui
+          shasum -a 256 autofetch-gui > autofetch-gui.sha256
+          shasum -a 256 autofetch-macos-intel-app.zip > autofetch-macos-intel-app.zip.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-macos-intel
+          path: dist/macos-intel-gui/
+
+  build-gui-macos-arm64:
+    name: gui-macos-arm64
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Fyne CLI
+        run: go install fyne.io/tools/cmd/fyne@latest
+
+      - name: Download modules
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Prepare output dir
+        run: mkdir -p dist/macos-arm64-gui
+
+      - name: Build GUI binary
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          LDFLAGS="-s -w -X main.Version=${VERSION}"
+
+          export CGO_ENABLED=1
+          export GOOS=darwin
+          export GOARCH=arm64
+
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/macos-arm64-gui/autofetch-gui" \
+            ./cmd/autofetch-gui
+
+      - name: Package .app
+        shell: bash
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+
+          cd cmd/autofetch-gui
+          if [ -f ../../Icon.png ]; then
+            fyne package -os darwin -name autofetch -release -icon ../../Icon.png
+          else
+            fyne package -os darwin -name autofetch -release
+          fi
+
+          mv autofetch.app ../../dist/macos-arm64-gui/autofetch.app
+          cd ../../dist/macos-arm64-gui
+          ditto -c -k --sequesterRsrc --keepParent autofetch.app autofetch-macos-arm64-app.zip
+
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          cd dist/macos-arm64-gui
+          shasum -a 256 autofetch-gui > autofetch-gui.sha256
+          shasum -a 256 autofetch-macos-arm64-app.zip > autofetch-macos-arm64-app.zip.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-macos-arm64
+          path: dist/macos-arm64-gui/
