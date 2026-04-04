@@ -1,219 +1,83 @@
 # autofetch client
 
-Headless Download-Client für das autofetch-System.
-
-Der Client verbindet sich mit dem offiziellen autofetch-Dienst,
-übernimmt Download-Aufträge, sendet Heartbeats und meldet Ergebnisse
-zurück.
-
-Eine Server-Konfiguration ist nicht erforderlich.
-
----
-
-## Funktionen
-
-- Headless-Betrieb (keine Benutzeroberfläche)
-- Sichere Client-Authentifizierung per Pairing und Token
-- Zuverlässiges Job-Leasing mit Heartbeats
-- Idempotente Downloads (Deduplizierung)
-- Plattformübergreifende Binaries (Linux, macOS, Windows, Raspberry Pi)
-- Geeignet für Server, NAS-Systeme und Low-Power-Geräte
-
----
-
-## Installation
-
-1. Lade das Archiv für deine Plattform herunter.
-2. Entpacke es.
-3. Platziere das `autofetch`-Binary an einem geeigneten Ort.
-
-Es sind keine zusätzlichen Abhängigkeiten erforderlich.
-
----
-
-## Erster Start / Pairing
-
-Beim ersten Start ist der Client noch nicht gekoppelt.
-
-```bash
-./autofetch
-Der Client gibt einen Pairing-Code aus.
-
-Diesen Code im autofetch-Webinterface unter Clients eingeben.
-Nach Freigabe speichert der Client seine Zugangsdaten lokal und
-beginnt automatisch mit der Arbeit.
-
-Erneutes Pairing
-Wenn ein Client widerrufen wurde oder neu gekoppelt werden soll:
-
-./autofetch --re-pair
-Lokale Zugangsdaten werden gelöscht und ein neues Pairing gestartet.
-
-Betrieb als Dienst
-Linux (systemd)
-Benutzer und Verzeichnisse anlegen
-sudo useradd -r -s /usr/sbin/nologin autofetch
-sudo mkdir -p /var/lib/autofetch
-sudo chown autofetch:autofetch /var/lib/autofetch
-Binary installieren
-sudo cp autofetch /usr/local/bin/autofetch
-sudo chmod +x /usr/local/bin/autofetch
-Service-Datei erstellen
-/etc/systemd/system/autofetch.service
-
-[Unit]
-Description=autofetch client
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=autofetch
-Group=autofetch
-ExecStart=/usr/local/bin/autofetch
-WorkingDirectory=/var/lib/autofetch
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-Aktivieren und starten:
-
-sudo systemctl daemon-reload
-sudo systemctl enable autofetch
-sudo systemctl start autofetch
-Logs anzeigen:
-
-journalctl -u autofetch -f
-macOS (launchd)
-Binary installieren:
-
-sudo cp autofetch /usr/local/bin/autofetch
-sudo chmod +x /usr/local/bin/autofetch
-LaunchAgent anlegen:
-
-~/Library/LaunchAgents/com.autofetch.client.plist
-
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.autofetch.client</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/autofetch</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>/tmp/autofetch.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>/tmp/autofetch.err.log</string>
-</dict>
-</plist>
-Laden:
-
-launchctl load ~/Library/LaunchAgents/com.autofetch.client.plist
-Windows
-Binary z. B. nach
-C:\Program Files\autofetch\ kopieren.
-
-Erster Start (für Pairing):
-
-cd "C:\Program Files\autofetch"
-.\autofetch.exe
-Als Dienst ausführen (empfohlen) mit NSSM:
-
-nssm install autofetch "C:\Program Files\autofetch\autofetch.exe"
-nssm start autofetch
-Sicherheitsmodell (Kurzfassung)
-Authentifizierung über serverseitig ausgegebene Tokens
-
-Alle Client-API-Aufrufe sind authentifiziert
-
-Tokens können serverseitig jederzeit widerrufen werden
-
-Jobs werden nur nach erfolgreichem Pairing vergeben
-
-Lizenz / License
-Diese Software ist proprietär.
-
-Die Nutzung ist ausschließlich in Verbindung mit dem offiziellen
-autofetch-Dienst gestattet.
-
-Der Nutzer ist dafür verantwortlich, dass die Verwendung dieser Software
-im Einklang mit geltendem Recht und den Rechten Dritter erfolgt.
-
-Weitere Details siehe LICENSE.txt.
-
-
-
-
-# autofetch client
-
 Headless download client for the autofetch system.
 
-The client connects to the official autofetch service, leases jobs,
-downloads media, sends heartbeats, and reports results back to the server.
+The client connects to the autofetch service, retrieves download jobs, processes them locally, and reports results back to the server.
 
-No server configuration is required.
+No manual server configuration is required.
 
 ---
 
 ## Features
 
-- Headless operation (no UI)
-- Secure client authentication via pairing and token
-- Robust job leasing with heartbeats
-- Idempotent downloads (deduplication support)
-- Cross-platform binaries (Linux, macOS, Windows, Raspberry Pi)
-- Suitable for servers, NAS systems, and low-power devices
+* Headless operation (no UI)
+* Secure client authentication via pairing and token
+* Reliable job leasing with heartbeat mechanism
+* Idempotent downloads (deduplication)
+* Cross-platform support (Linux, macOS, Windows, ARM)
+* Suitable for servers, NAS systems, and low-power devices
 
 ---
 
 ## Installation
 
-1. Download the archive matching your platform.
-2. Extract it.
-3. Place the `autofetch` binary in a suitable directory.
+1. Download the appropriate binary for your platform.
+2. Extract the archive (if applicable).
+3. Place the `autofetch` binary in a suitable location.
 
 No additional dependencies are required.
 
 ---
 
-## First start / Pairing
+## First Start & Pairing
 
-On first start, the client is unpaired.
+On first start, the client is not yet connected to a server.
 
 ```bash
 ./autofetch
-The client prints a pairing code.
+```
 
-Enter this code in the autofetch web interface under Clients.
-Once approved, the client stores its credentials locally and starts working
-automatically.
+The client will print a pairing code.
 
-Re-pairing
-If a client was revoked or should be paired again:
+Enter this code in the autofetch web interface under **Clients**.
+Once approved, the client stores its credentials locally and starts processing jobs automatically.
 
+### Re-pairing
+
+To reset the connection and start a new pairing process:
+
+```bash
 ./autofetch --re-pair
-This clears local credentials and starts a new pairing flow.
+```
 
-Running as a service
-Linux (systemd)
-1. Create user and directories
+---
+
+## Running as a Service
+
+### Linux (systemd)
+
+Create user and directories:
+
+```bash
 sudo useradd -r -s /usr/sbin/nologin autofetch
 sudo mkdir -p /var/lib/autofetch
 sudo chown autofetch:autofetch /var/lib/autofetch
-2. Install binary
+```
+
+Install binary:
+
+```bash
 sudo cp autofetch /usr/local/bin/autofetch
 sudo chmod +x /usr/local/bin/autofetch
-3. Create service file
-/etc/systemd/system/autofetch.service
+```
 
+Create service file:
+
+```
+/etc/systemd/system/autofetch.service
+```
+
+```ini
 [Unit]
 Description=autofetch client
 After=network-online.target
@@ -229,89 +93,95 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-4. Enable and start
+```
+
+Enable and start:
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable autofetch
 sudo systemctl start autofetch
+```
+
 Logs:
 
+```bash
 journalctl -u autofetch -f
-macOS (launchd)
-1. Install binary
+```
+
+---
+
+### macOS (launchd)
+
+Install binary:
+
+```bash
 sudo cp autofetch /usr/local/bin/autofetch
 sudo chmod +x /usr/local/bin/autofetch
-2. Create LaunchAgent
+```
+
+Create LaunchAgent:
+
+```
 ~/Library/LaunchAgents/com.autofetch.client.plist
+```
 
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.autofetch.client</string>
+Load service:
 
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/autofetch</string>
-  </array>
-
-  <key>RunAtLoad</key>
-  <true/>
-
-  <key>KeepAlive</key>
-  <true/>
-
-  <key>StandardOutPath</key>
-  <string>/tmp/autofetch.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>/tmp/autofetch.err.log</string>
-</dict>
-</plist>
-3. Load service
+```bash
 launchctl load ~/Library/LaunchAgents/com.autofetch.client.plist
-Windows
-1. Install binary
-Extract autofetch.exe
+```
 
-Place it in e.g. C:\Program Files\autofetch\
+---
 
-2. Run manually (first pairing)
-Open PowerShell:
+### Windows
 
+1. Place `autofetch.exe` in e.g.:
+
+   ```
+   C:\Program Files\autofetch\
+   ```
+
+2. First run (pairing):
+
+```powershell
 cd "C:\Program Files\autofetch"
 .\autofetch.exe
-Complete pairing in the web interface.
+```
 
-3. Run as a service (recommended)
-Use a service wrapper such as NSSM (Non-Sucking Service Manager).
+3. Run as a service (recommended):
 
-Example:
+Using NSSM:
 
+```powershell
 nssm install autofetch "C:\Program Files\autofetch\autofetch.exe"
 nssm start autofetch
-Security model (short)
-Client authenticates using a server-issued token
+```
 
-All client API calls are authenticated
+---
 
-Tokens can be revoked server-side at any time
+## Security Model
 
-Pairing approval is required before a client receives jobs
+* Clients authenticate using a server-issued token
+* All API communication is authenticated
+* Tokens can be revoked at any time
+* Jobs are only assigned after successful pairing
 
-Uninstall
-Stop the service
+---
 
-Remove the binary
+## Project Structure
 
-Delete the local working directory (credentials are stored locally)
+This repository contains **only the client**.
+
+* The client is open source
+* The autofetch server is **not part of this repository** and remains proprietary
+
+---
 
 ## License
 
-This software is proprietary and may only be used with the official
-autofetch service.
+This project is licensed under the MIT License.
 
-The user is responsible for ensuring that their use of this software
-complies with applicable laws and third-party rights.
+You are free to use, modify, and distribute the client software.
 
-For further details see LICENSE.txt.
+See the `LICENSE` file for details.
