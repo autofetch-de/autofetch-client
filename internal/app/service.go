@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xtorian/autofetch-client/internal/api"
-	"github.com/xtorian/autofetch-client/internal/config"
-	"github.com/xtorian/autofetch-client/internal/observe"
-	"github.com/xtorian/autofetch-client/internal/worker"
+	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/observe"
+	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
 
 type RunnerFactory func(obs observe.Observer) *worker.Runner

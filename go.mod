@@ -1,4 +1,4 @@
-module github.com/xtorian/autofetch-client
+module github.com/autofetch-de/autofetch-client
 
 go 1.23.0
 

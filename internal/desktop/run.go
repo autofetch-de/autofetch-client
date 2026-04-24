@@ -17,10 +17,10 @@ import (
 	"fyne.io/fyne/v2/theme"
 
 	"fyne.io/fyne/v2/widget"
-	"github.com/xtorian/autofetch-client/internal/desktop/assets"
+	"github.com/autofetch-de/autofetch-client/internal/desktop/assets"
 
-	"github.com/xtorian/autofetch-client/internal/app"
-	"github.com/xtorian/autofetch-client/internal/observe"
+	"github.com/autofetch-de/autofetch-client/internal/app"
+	"github.com/autofetch-de/autofetch-client/internal/observe"
 )
 
 func Run(ctx context.Context, svc *app.Service) error {

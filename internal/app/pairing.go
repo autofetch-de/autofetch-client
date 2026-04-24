@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xtorian/autofetch-client/internal/api"
-	"github.com/xtorian/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/config"
 )
 
 func normalizeArch(arch string) string {

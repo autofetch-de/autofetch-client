@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/xtorian/autofetch-client/internal/observe"
+	"github.com/autofetch-de/autofetch-client/internal/observe"
 )
 
 const DefaultPort = 23324

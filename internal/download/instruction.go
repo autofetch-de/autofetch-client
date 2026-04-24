@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/xtorian/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/api"
 )
 
 type ParsedInstruction struct {

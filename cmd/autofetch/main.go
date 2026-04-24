@@ -3,8 +3,8 @@ package main
 import (
 	"log"
 
-	"github.com/xtorian/autofetch-client/internal/app"
-	"github.com/xtorian/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/app"
+	"github.com/autofetch-de/autofetch-client/internal/config"
 )
 
 // Version can be overridden at build time with -ldflags "-X main.Version=...".

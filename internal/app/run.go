@@ -10,9 +10,9 @@ import (
 
 	"syscall"
 
-	"github.com/xtorian/autofetch-client/internal/config"
-	"github.com/xtorian/autofetch-client/internal/webui"
-	"github.com/xtorian/autofetch-client/internal/worker"
+	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/webui"
+	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
 
 func Run(cfg config.Config, version string) error {

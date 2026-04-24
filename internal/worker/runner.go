@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xtorian/autofetch-client/internal/api"
-	"github.com/xtorian/autofetch-client/internal/download"
-	"github.com/xtorian/autofetch-client/internal/observe"
-	clientruntime "github.com/xtorian/autofetch-client/internal/runtime"
+	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/download"
+	"github.com/autofetch-de/autofetch-client/internal/observe"
+	clientruntime "github.com/autofetch-de/autofetch-client/internal/runtime"
 )
 
 // ErrClientRevoked is returned when the server responds with

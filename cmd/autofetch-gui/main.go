@@ -5,10 +5,10 @@ import (
 	"errors"
 	"log"
 
-	"github.com/xtorian/autofetch-client/internal/app"
-	"github.com/xtorian/autofetch-client/internal/config"
-	"github.com/xtorian/autofetch-client/internal/desktop"
-	"github.com/xtorian/autofetch-client/internal/instance"
+	"github.com/autofetch-de/autofetch-client/internal/app"
+	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/desktop"
+	"github.com/autofetch-de/autofetch-client/internal/instance"
 )
 
 // Version can be overridden at build time with -ldflags "-X main.Version=...".

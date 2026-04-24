@@ -9,11 +9,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/xtorian/autofetch-client/internal/api"
-	"github.com/xtorian/autofetch-client/internal/config"
-	"github.com/xtorian/autofetch-client/internal/observe"
-	clientruntime "github.com/xtorian/autofetch-client/internal/runtime"
-	"github.com/xtorian/autofetch-client/internal/worker"
+	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/observe"
+	clientruntime "github.com/autofetch-de/autofetch-client/internal/runtime"
+	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
 
 func Bootstrap(cfg *config.Config, version string) (*Service, *observe.State, error) {
