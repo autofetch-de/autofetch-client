@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/observe"
@@ -20,6 +21,9 @@ type service interface {
 	Stop() error
 	StartRePair() error
 	TestConnection(context.Context) error
+	ConfigPath() string
+	DownloadDir() string
+	UpdateDownloadDir(string) error
 }
 
 type Server struct {
@@ -34,6 +38,7 @@ func New(addr string, state *observe.State, service service) *Server {
 	s := &Server{state: state, service: service, addr: addr}
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/start", s.handleStart)
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/test", s.handleTest)
@@ -75,6 +80,57 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.state.Snapshot())
 }
+
+type settingsResponse struct {
+	OK          bool   `json:"ok"`
+	ConfigPath  string `json:"config_path"`
+	DownloadDir string `json:"download_dir"`
+}
+
+type settingsUpdateRequest struct {
+	DownloadDir string `json:"download_dir"`
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(settingsResponse{
+			OK:          true,
+			ConfigPath:  s.service.ConfigPath(),
+			DownloadDir: s.service.DownloadDir(),
+		})
+	case http.MethodPost:
+		var in settingsUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err)
+			return
+		}
+		dir := strings.TrimSpace(in.DownloadDir)
+		if dir == "" {
+			writeJSONError(w, http.StatusBadRequest, errEmptyDownloadDir)
+			return
+		}
+		if err := s.service.UpdateDownloadDir(dir); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(settingsResponse{
+			OK:          true,
+			ConfigPath:  s.service.ConfigPath(),
+			DownloadDir: s.service.DownloadDir(),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+type simpleError string
+
+func (e simpleError) Error() string { return string(e) }
+
+const errEmptyDownloadDir = simpleError("download path missing")
 
 func writeJSONError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
@@ -158,13 +214,17 @@ var pageTemplate = template.Must(template.New("index").Parse(`<!doctype html>
     .offline { color: #b91c1c; }
     .buttons { display: flex; gap: 10px; flex-wrap: wrap; }
     button, a.button { border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; }
+    input { border: 1px solid #d1d5db; border-radius: 10px; padding: 10px 12px; font-size: 14px; width: 100%; box-sizing: border-box; }
     .primary { background: #111827; color: white; }
     .secondary { background: #e5e7eb; color: #111827; }
+    .danger { background: #fee2e2; color: #991b1b; }
     .code { display: inline-flex; align-items: center; gap: 10px; padding: 12px 14px; background: #111827; color: #fff; border-radius: 12px; font-weight: 700; font-size: 28px; letter-spacing: 2px; }
     .muted { color: #6b7280; }
     pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 10px; min-height: 220px; overflow: auto; }
     .hint { color: #6b7280; font-size: 13px; margin-top: 8px; }
     .hidden { display: none; }
+    .settings-row { display: grid; grid-template-columns: 220px 1fr; gap: 10px 14px; align-items: center; margin-bottom: 12px; }
+    @media (max-width: 640px) { .grid, .settings-row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -175,9 +235,27 @@ var pageTemplate = template.Must(template.New("index").Parse(`<!doctype html>
       <button class="primary" onclick="action('/api/start', 'Start angefordert')">Start</button>
       <button class="secondary" onclick="action('/api/stop', 'Stop angefordert')">Stop</button>
       <button class="secondary" onclick="action('/api/test')">Verbindung testen</button>
+      <button class="secondary" onclick="showSettings()">Einstellungen</button>
       <button class="secondary" onclick="action('/api/repair', 'Neues Pairing gestartet')">Neu koppeln</button>
     </div>
     <div class="hint" id="action-result"></div>
+  </div>
+
+  <div class="card hidden" id="settings-card">
+    <h2>Einstellungen</h2>
+    <div class="settings-row">
+      <div class="label">Download-Ordner</div>
+      <div><input id="settings-download-dir" autocomplete="off" placeholder="Download-Basisordner"></div>
+    </div>
+    <div class="settings-row">
+      <div class="label">Konfigurationsdatei</div>
+      <div id="settings-config-path" class="muted">-</div>
+    </div>
+    <div class="buttons">
+      <button class="primary" onclick="saveSettings()">Speichern</button>
+      <button class="secondary" onclick="hideSettings()">Schließen</button>
+    </div>
+    <div class="hint" id="settings-result">Änderungen am Download-Ordner werden gespeichert und bei laufendem Client direkt übernommen.</div>
   </div>
 
   <div class="card" id="pairing-card">
@@ -257,6 +335,48 @@ async function action(path, successMsg) {
   } catch (_) {}
   out.textContent = msg;
   refresh();
+}
+
+async function showSettings() {
+  const card = document.getElementById('settings-card');
+  const out = document.getElementById('settings-result');
+  card.classList.remove('hidden');
+  out.textContent = 'lade Einstellungen...';
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Einstellungen konnten nicht geladen werden');
+    document.getElementById('settings-download-dir').value = data.download_dir || '';
+    setText('settings-config-path', data.config_path);
+    out.textContent = 'Änderungen am Download-Ordner werden gespeichert und bei laufendem Client direkt übernommen.';
+  } catch (err) {
+    out.textContent = err.message || String(err);
+  }
+}
+
+function hideSettings() {
+  document.getElementById('settings-card').classList.add('hidden');
+}
+
+async function saveSettings() {
+  const out = document.getElementById('settings-result');
+  const dir = document.getElementById('settings-download-dir').value.trim();
+  out.textContent = 'speichere...';
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ download_dir: dir })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Speichern fehlgeschlagen');
+    document.getElementById('settings-download-dir').value = data.download_dir || dir;
+    setText('settings-config-path', data.config_path);
+    out.textContent = 'Einstellungen gespeichert.';
+    refresh();
+  } catch (err) {
+    out.textContent = err.message || String(err);
+  }
 }
 
 async function copyCode() {

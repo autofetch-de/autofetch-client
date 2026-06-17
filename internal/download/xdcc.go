@@ -213,10 +213,14 @@ func DownloadXDCCToFile(ctx context.Context, opt XDCCOptions, destPath string, b
 		offer = o
 	}
 
-	// Validate offered filename matches expected
+	// Validate offered filename matches expected.
+	// Some XDCC bots preserve spaces in DCC SEND ("test file.pdf"), while the
+	// server-side expected name may already be filesystem-normalized
+	// ("test_file.pdf"). Accept only this narrow formatting difference so we
+	// still reject genuinely different files.
 	offered := strings.TrimSpace(offer.Filename)
 	expected := strings.TrimSpace(opt.ExpectedFilename)
-	if offered != expected {
+	if !xdccFilenamesMatch(expected, offered) {
 		return nil, nil, &XDCCFilenameMismatchError{
 			Expected: expected,
 			Offered:  offered,
@@ -238,6 +242,37 @@ func DownloadXDCCToFile(ctx context.Context, opt XDCCOptions, destPath string, b
 		return nil, prog, err
 	}
 	return res, prog, nil
+}
+
+func xdccFilenamesMatch(expected, offered string) bool {
+	expected = strings.TrimSpace(expected)
+	offered = strings.TrimSpace(offered)
+	if expected == offered {
+		return true
+	}
+	return normalizeXDCCFilenameForMatch(expected) == normalizeXDCCFilenameForMatch(offered)
+}
+
+func normalizeXDCCFilenameForMatch(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	lastWasSeparator := false
+	for _, r := range name {
+		if r == '_' || r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if !lastWasSeparator {
+				b.WriteRune(' ')
+				lastWasSeparator = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastWasSeparator = false
+	}
+	return strings.ToLower(strings.TrimSpace(b.String()))
 }
 
 type dccOffer struct {
