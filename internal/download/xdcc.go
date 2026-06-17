@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ErrXDCCFilenameMismatch is returned when the DCC SEND offer filename
@@ -215,9 +216,9 @@ func DownloadXDCCToFile(ctx context.Context, opt XDCCOptions, destPath string, b
 
 	// Validate offered filename matches expected.
 	// Some XDCC bots preserve spaces in DCC SEND ("test file.pdf"), while the
-	// server-side expected name may already be filesystem-normalized
-	// ("test_file.pdf"). Accept only this narrow formatting difference so we
-	// still reject genuinely different files.
+	// server-side expected name may already use common filename separators
+	// ("test_file.pdf" or "test-file.pdf"). Treat whitespace, underscores,
+	// and dashes as equivalent separators while still rejecting different words.
 	offered := strings.TrimSpace(offer.Filename)
 	expected := strings.TrimSpace(opt.ExpectedFilename)
 	if !xdccFilenamesMatch(expected, offered) {
@@ -262,7 +263,7 @@ func normalizeXDCCFilenameForMatch(name string) string {
 	var b strings.Builder
 	lastWasSeparator := false
 	for _, r := range name {
-		if r == '_' || r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+		if r == '_' || r == '-' || unicode.IsSpace(r) {
 			if !lastWasSeparator {
 				b.WriteRune(' ')
 				lastWasSeparator = true
