@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/autofetch-de/autofetch-client/internal/config"
+	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
+
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
@@ -462,6 +465,73 @@ func (v *mainView) stopOrPause(svc *app.Service) {
 	v.refresh(svc)
 }
 
+func sanitizeIRCNetworksForEditor(networks []config.IRCNetwork) []config.IRCNetwork {
+	out := make([]config.IRCNetwork, len(networks))
+	for i, n := range networks {
+		out[i] = n
+		out[i].NickServ.Password = ""
+		out[i].SASL.Username = ""
+		out[i].SASL.Password = ""
+	}
+	return out
+}
+
+func preserveExistingIRCSecrets(next, existing []config.IRCNetwork) []config.IRCNetwork {
+	byHost := map[string]config.IRCNetwork{}
+	for _, n := range existing {
+		host := strings.TrimSpace(strings.ToLower(n.Host))
+		if host == "" {
+			continue
+		}
+		byHost[host] = n
+	}
+	for i := range next {
+		host := strings.TrimSpace(strings.ToLower(next[i].Host))
+		prev, ok := byHost[host]
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(next[i].NickServ.Password) == "" {
+			next[i].NickServ.Password = prev.NickServ.Password
+		}
+		if strings.TrimSpace(next[i].SASL.Username) == "" {
+			next[i].SASL.Username = prev.SASL.Username
+		}
+		if strings.TrimSpace(next[i].SASL.Password) == "" {
+			next[i].SASL.Password = prev.SASL.Password
+		}
+	}
+	return next
+}
+
+func buildIRCSecretStatus(networks []config.IRCNetwork) string {
+	lines := make([]string, 0, len(networks))
+	for _, n := range networks {
+		host := strings.TrimSpace(n.Host)
+		if host == "" {
+			host = strings.TrimSpace(n.Name)
+		}
+		if host == "" {
+			continue
+		}
+		status := make([]string, 0, 2)
+		if strings.TrimSpace(n.NickServ.Password) != "" {
+			status = append(status, "NickServ-Passwort gespeichert")
+		}
+		if strings.TrimSpace(n.SASL.Username) != "" || strings.TrimSpace(n.SASL.Password) != "" {
+			status = append(status, "SASL-Zugang gespeichert")
+		}
+		if len(status) == 0 {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s", host, strings.Join(status, ", ")))
+	}
+	if len(lines) == 0 {
+		return "Keine lokalen IRC-Zugangsdaten gespeichert. Passwortfelder bleiben im JSON-Editor absichtlich leer; leere Felder ändern bestehende Secrets nicht."
+	}
+	return "Lokal gespeicherte IRC-Zugangsdaten\n- " + strings.Join(lines, "\n- ") + "\n\nPasswortfelder bleiben im JSON-Editor absichtlich leer; leere Felder ändern bestehende Secrets nicht."
+}
+
 func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 	snap := svc.Snapshot()
 	downloadDir := widget.NewEntry()
@@ -473,8 +543,14 @@ func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 	serverURL := widget.NewLabel("https://autofetch.de")
 	pairingStatus := widget.NewLabel(settingsPairingStatus(snap))
 	pairingStatus.Wrapping = fyne.TextWrapWord
-	hint := widget.NewLabel("Änderungen am Download-Ordner werden gespeichert und bei laufendem Client direkt übernommen.")
+	hint := widget.NewLabel("Änderungen am Download-Ordner und an der IRC-Identität werden lokal gespeichert und bei laufendem Client direkt übernommen.")
 	hint.Wrapping = fyne.TextWrapWord
+	//ircCfg := svc.IRCConfig()
+	ircSettingsButton := widget.NewButtonWithIcon("IRC-Einstellungen öffnen", theme.SettingsIcon(), func() {
+		v.openIRCSettingsDialog(w, svc)
+	})
+	ircSettingsHint := widget.NewLabel("IRC-Networks, NickServ und SASL werden in einem eigenen Dialog bearbeitet.")
+	ircSettingsHint.Wrapping = fyne.TextWrapWord
 
 	chooseButton := widget.NewButtonWithIcon("Ordner wählen", theme.FolderOpenIcon(), func() {
 		dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
@@ -494,6 +570,7 @@ func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 		widget.NewFormItem("Server", serverURL),
 		widget.NewFormItem("Status", pairingStatus),
 		widget.NewFormItem("Download-Ordner", container.NewVBox(downloadDir, chooseButton, hint)),
+		widget.NewFormItem("IRC", container.NewVBox(ircSettingsButton, ircSettingsHint)),
 	)
 
 	dlg := dialog.NewCustomConfirm("Einstellungen", "Speichern", "Abbrechen", container.NewPadded(form), func(ok bool) {
@@ -501,7 +578,8 @@ func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 			return
 		}
 		go func() {
-			err := svc.UpdateDownloadDir(downloadDir.Text)
+			updatedIRC := svc.IRCConfig()
+			err := svc.UpdateLocalSettings(downloadDir.Text, updatedIRC, updatedIRC.AutoRegister, updatedIRC.RegistrationEmail)
 			fyne.Do(func() {
 				if err != nil {
 					v.setActionText(err.Error())
@@ -512,7 +590,318 @@ func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 			})
 		}()
 	}, w)
-	dlg.Resize(fyne.NewSize(620, 420))
+	dlg.Resize(fyne.NewSize(680, 520))
+	dlg.Show()
+}
+
+func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
+	current := svc.IRCConfig().WithDefaults()
+	networks := append([]config.IRCNetwork(nil), current.Networks...)
+	selected := -1
+
+	ensureAtLeastOne := func() {
+		if len(networks) == 0 {
+			selected = -1
+			return
+		}
+		if selected < 0 || selected >= len(networks) {
+			selected = 0
+		}
+	}
+	ensureAtLeastOne()
+
+	labelForNetwork := func(n config.IRCNetwork, idx int) string {
+		host := strings.TrimSpace(n.Host)
+		if host == "" {
+			host = strings.TrimSpace(n.Name)
+		}
+		if host == "" {
+			host = fmt.Sprintf("Network %d", idx+1)
+		}
+		return host
+	}
+	channelSummary := func(n config.IRCNetwork) string {
+		if len(n.Channels) == 0 {
+			return "ohne Channels"
+		}
+		if len(n.Channels) == 1 {
+			return n.Channels[0]
+		}
+		return fmt.Sprintf("%s +%d", n.Channels[0], len(n.Channels)-1)
+	}
+
+	hostEntry := widget.NewEntry()
+	nameEntry := widget.NewEntry()
+	portEntry := widget.NewEntry()
+	tlsCheck := widget.NewCheck("TLS verwenden", nil)
+	channelsEntry := widget.NewEntry()
+	channelsEntry.SetPlaceHolder("#channel1, #channel2")
+	nickEntry := widget.NewEntry()
+	userEntry := widget.NewEntry()
+	realnameEntry := widget.NewEntry()
+	generateNickBtn := widget.NewButton("Neuen Nick generieren", nil)
+	nickServEnabled := widget.NewCheck("NickServ verwenden", nil)
+	nickServCommand := widget.NewEntry()
+	nickServPassword := widget.NewPasswordEntry()
+	nickServPassword.SetPlaceHolder("Leer lassen = unverändert")
+	nickServDelete := widget.NewButton("NickServ-Passwort löschen", nil)
+	saslEnabled := widget.NewCheck("SASL verwenden", nil)
+	saslUsername := widget.NewEntry()
+	saslPassword := widget.NewPasswordEntry()
+	saslPassword.SetPlaceHolder("Leer lassen = unverändert")
+	saslDelete := widget.NewButton("SASL-Zugang löschen", nil)
+	secretStatus := widget.NewLabel("")
+	secretStatus.Wrapping = fyne.TextWrapWord
+	defaultNick := widget.NewEntry()
+	defaultNick.SetText(strings.TrimSpace(current.DefaultNick))
+	defaultNick.SetPlaceHolder("z. B. silentFalcon42")
+	generateDefaultNick := widget.NewButton("Neu generieren", func() {
+		defaultNick.SetText(internalirc.GenerateDefaultNick())
+	})
+	autoRegisterCheck := widget.NewCheck("Nick bei Bedarf automatisch registrieren", nil)
+	autoRegisterCheck.SetChecked(current.AutoRegister)
+	registrationEmail := widget.NewEntry()
+	registrationEmail.SetText(strings.TrimSpace(current.RegistrationEmail))
+	registrationEmail.SetPlaceHolder("E-Mail-Adresse für Nick-Registrierung")
+	reverseDCCCheck := widget.NewCheck("Reverse-/Passive-DCC-Angebote annehmen", nil)
+	reverseDCCCheck.SetChecked(current.ReverseDCCEnabled)
+	reverseDCCPortMin := widget.NewEntry()
+	reverseDCCPortMin.SetText(fmt.Sprintf("%d", current.ReverseDCCPortMin))
+	reverseDCCPortMin.SetPlaceHolder("z. B. 36080")
+	reverseDCCPortMax := widget.NewEntry()
+	reverseDCCPortMax.SetText(fmt.Sprintf("%d", current.ReverseDCCPortMax))
+	reverseDCCPortMax.SetPlaceHolder("z. B. 36090")
+	reverseDCCHint := widget.NewLabel("Nur für Bots nötig, die Reverse-/Passive-DCC verwenden. Der eingestellte TCP-Portbereich muss im Router/Firewall auf die interne IP dieses Clients weitergeleitet werden.")
+	reverseDCCHint.Wrapping = fyne.TextWrapWord
+	globalHint := widget.NewLabel("Diese IRC-Einstellungen werden nur lokal gespeichert. Zugangsdaten liegen in irc-secrets.json, nicht in client.json.")
+	globalHint.Wrapping = fyne.TextWrapWord
+	localOnlyHint := widget.NewLabel("Networks und Channels werden aus Download-Aufträgen übernommen. Links wählst du vorhandene Einträge aus; rechts pflegst du lokale NickServ- und SASL-Daten. Passwortfelder bleiben leer, wenn bestehende Secrets unverändert bleiben sollen.")
+	localOnlyHint.Wrapping = fyne.TextWrapWord
+	listHint := widget.NewLabel("Vorhandene Networks")
+	listHint.TextStyle = fyne.TextStyle{Bold: true}
+	selectedInfo := widget.NewLabel("")
+	selectedInfo.Wrapping = fyne.TextWrapWord
+
+	loadFields := func() {
+		ensureAtLeastOne()
+		if selected < 0 || selected >= len(networks) {
+			for _, e := range []*widget.Entry{nameEntry, hostEntry, portEntry, channelsEntry, nickEntry, userEntry, realnameEntry, nickServCommand, nickServPassword, saslUsername, saslPassword} {
+				e.SetText("")
+			}
+			tlsCheck.SetChecked(false)
+			nickServEnabled.SetChecked(false)
+			saslEnabled.SetChecked(false)
+			selectedInfo.SetText("Noch keine IRC-Networks vorhanden. Sie werden automatisch angelegt, sobald ein Download-Auftrag für ein neues Network ankommt.")
+			secretStatus.SetText("")
+			return
+		}
+		n := networks[selected]
+		nameEntry.SetText(n.Name)
+		hostEntry.SetText(n.Host)
+		if n.Port > 0 {
+			portEntry.SetText(fmt.Sprintf("%d", n.Port))
+		} else {
+			portEntry.SetText("")
+		}
+		tlsCheck.SetChecked(n.TLS)
+		channelsEntry.SetText(strings.Join(n.Channels, ", "))
+		nickEntry.SetText(n.Nick)
+		userEntry.SetText(n.Username)
+		realnameEntry.SetText(n.Realname)
+		nickServEnabled.SetChecked(n.NickServ.Enabled)
+		nickServCommand.SetText(n.NickServ.Command)
+		nickServPassword.SetText("")
+		saslEnabled.SetChecked(n.SASL.Enabled)
+		saslUsername.SetText("")
+		saslPassword.SetText("")
+		selectedInfo.SetText(fmt.Sprintf("Ausgewähltes Network: %s (%s)", labelForNetwork(n, selected), channelSummary(n)))
+		if strings.TrimSpace(n.NickServ.Password) != "" || strings.TrimSpace(n.SASL.Username) != "" || strings.TrimSpace(n.SASL.Password) != "" {
+			secretStatus.SetText(buildIRCSecretStatus([]config.IRCNetwork{n}))
+		} else {
+			secretStatus.SetText("Keine lokalen Zugangsdaten für dieses Network gespeichert.")
+		}
+	}
+	applyFields := func() {
+		if selected < 0 || selected >= len(networks) {
+			return
+		}
+		n := &networks[selected]
+		n.Name = strings.TrimSpace(nameEntry.Text)
+		n.Host = strings.TrimSpace(hostEntry.Text)
+		if port := strings.TrimSpace(portEntry.Text); port != "" {
+			var pv int
+			if _, err := fmt.Sscanf(port, "%d", &pv); err == nil && pv > 0 {
+				n.Port = pv
+			}
+		}
+		n.TLS = tlsCheck.Checked
+		parts := strings.Split(channelsEntry.Text, ",")
+		chs := make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				chs = append(chs, part)
+			}
+		}
+		n.Channels = chs
+		n.Nick = strings.TrimSpace(nickEntry.Text)
+		n.Username = strings.TrimSpace(userEntry.Text)
+		n.Realname = strings.TrimSpace(realnameEntry.Text)
+		n.NickServ.Enabled = nickServEnabled.Checked
+		n.NickServ.Command = strings.TrimSpace(nickServCommand.Text)
+		if pw := strings.TrimSpace(nickServPassword.Text); pw != "" {
+			n.NickServ.Password = pw
+		}
+		n.SASL.Enabled = saslEnabled.Checked
+		if su := strings.TrimSpace(saslUsername.Text); su != "" {
+			n.SASL.Username = su
+		}
+		if pw := strings.TrimSpace(saslPassword.Text); pw != "" {
+			n.SASL.Password = pw
+		}
+	}
+
+	generateNickBtn.OnTapped = func() {
+		oldNick := strings.TrimSpace(nickEntry.Text)
+		newNick := internalirc.GenerateDefaultNick()
+		nickEntry.SetText(newNick)
+		if strings.TrimSpace(userEntry.Text) == "" || strings.TrimSpace(userEntry.Text) == oldNick {
+			userEntry.SetText(newNick)
+		}
+	}
+	nickServDelete.OnTapped = func() {
+		if selected >= 0 && selected < len(networks) {
+			networks[selected].NickServ.Password = ""
+			nickServPassword.SetText("")
+			loadFields()
+		}
+	}
+	saslDelete.OnTapped = func() {
+		if selected >= 0 && selected < len(networks) {
+			networks[selected].SASL.Username = ""
+			networks[selected].SASL.Password = ""
+			saslUsername.SetText("")
+			saslPassword.SetText("")
+			loadFields()
+		}
+	}
+
+	networkList := widget.NewList(
+		func() int { return len(networks) },
+		func() fyne.CanvasObject {
+			title := widget.NewLabel("Network")
+			title.TextStyle = fyne.TextStyle{Bold: true}
+			title.Wrapping = fyne.TextWrapWord
+			subtitle := widget.NewLabel("")
+			subtitle.Wrapping = fyne.TextWrapWord
+			return container.NewVBox(title, subtitle)
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			box := obj.(*fyne.Container)
+			title := box.Objects[0].(*widget.Label)
+			subtitle := box.Objects[1].(*widget.Label)
+			n := networks[id]
+			title.SetText(labelForNetwork(n, id))
+			subtitle.SetText(channelSummary(n))
+		},
+	)
+	networkList.OnSelected = func(id widget.ListItemID) {
+		applyFields()
+		selected = id
+		loadFields()
+	}
+
+	refreshList := func() {
+		ensureAtLeastOne()
+		networkList.Refresh()
+		if selected >= 0 {
+			networkList.Select(selected)
+		} else {
+			networkList.UnselectAll()
+		}
+		loadFields()
+	}
+
+	globalForm := widget.NewForm(
+		widget.NewFormItem("Default Nick", container.NewBorder(nil, nil, nil, generateDefaultNick, defaultNick)),
+		widget.NewFormItem("Auto-Registrierung", container.NewVBox(autoRegisterCheck, widget.NewLabel("Registrierungs-E-Mail"), registrationEmail)),
+		widget.NewFormItem("Reverse DCC", container.NewVBox(
+			reverseDCCCheck,
+			widget.NewLabel("DCC-Portbereich"),
+			container.NewGridWithColumns(2, reverseDCCPortMin, reverseDCCPortMax),
+			reverseDCCHint,
+			globalHint,
+		)),
+	)
+
+	detailForm := widget.NewForm(
+		widget.NewFormItem("Anzeigename", nameEntry),
+		widget.NewFormItem("Host", hostEntry),
+		widget.NewFormItem("Port", portEntry),
+		widget.NewFormItem("TLS", tlsCheck),
+		widget.NewFormItem("Channels", channelsEntry),
+		widget.NewFormItem("Nick", container.NewBorder(nil, nil, nil, generateNickBtn, nickEntry)),
+		widget.NewFormItem("Username", userEntry),
+		widget.NewFormItem("Realname", realnameEntry),
+		widget.NewFormItem("NickServ", nickServEnabled),
+		widget.NewFormItem("NickServ Command", nickServCommand),
+		widget.NewFormItem("NickServ Passwort", container.NewVBox(nickServPassword, nickServDelete)),
+		widget.NewFormItem("SASL", saslEnabled),
+		widget.NewFormItem("SASL Username", saslUsername),
+		widget.NewFormItem("SASL Passwort", container.NewVBox(saslPassword, saslDelete)),
+	)
+
+	leftPanel := container.NewBorder(
+		container.NewVBox(listHint),
+		widget.NewLabel("Keine manuelle Anlage nötig"),
+		nil,
+		nil,
+		networkList,
+	)
+	rightPanel := container.NewVBox(localOnlyHint, selectedInfo, secretStatus, detailForm)
+	split := container.NewHSplit(container.NewPadded(leftPanel), container.NewPadded(rightPanel))
+	split.Offset = 0.32
+	content := container.NewPadded(container.NewVBox(globalForm, widget.NewSeparator(), split))
+	scroller := container.NewVScroll(content)
+	scroller.SetMinSize(fyne.NewSize(900, 640))
+	refreshList()
+
+	dlg := dialog.NewCustomConfirm("IRC-Einstellungen", "Speichern", "Schließen", scroller, func(ok bool) {
+		if !ok {
+			return
+		}
+		go func() {
+			applyFields()
+			updatedIRC := svc.IRCConfig()
+			updatedIRC.DefaultNick = strings.TrimSpace(defaultNick.Text)
+			updatedIRC.AutoRegister = autoRegisterCheck.Checked
+			updatedIRC.RegistrationEmail = strings.TrimSpace(registrationEmail.Text)
+			updatedIRC.ReverseDCCEnabled = reverseDCCCheck.Checked
+			if port := strings.TrimSpace(reverseDCCPortMin.Text); port != "" {
+				var pv int
+				if _, err := fmt.Sscanf(port, "%d", &pv); err == nil && pv > 0 {
+					updatedIRC.ReverseDCCPortMin = pv
+				}
+			}
+			if port := strings.TrimSpace(reverseDCCPortMax.Text); port != "" {
+				var pv int
+				if _, err := fmt.Sscanf(port, "%d", &pv); err == nil && pv > 0 {
+					updatedIRC.ReverseDCCPortMax = pv
+				}
+			}
+			updatedIRC.Networks = networks
+			err := svc.UpdateLocalSettings(strings.TrimSpace(svc.DownloadDir()), updatedIRC, updatedIRC.AutoRegister, updatedIRC.RegistrationEmail)
+			fyne.Do(func() {
+				if err != nil {
+					v.setActionText(err.Error())
+					return
+				}
+				v.setActionText("IRC-Einstellungen gespeichert.")
+				v.refresh(svc)
+			})
+		}()
+	}, w)
+	dlg.Resize(fyne.NewSize(920, 700))
 	dlg.Show()
 }
 

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,8 +11,64 @@ import (
 	"time"
 )
 
+type IRCNickServ struct {
+	Enabled  bool   `json:"enabled"`
+	Password string `json:"password"`
+	Command  string `json:"command"`
+}
+
+type IRCSASL struct {
+	Enabled  bool   `json:"enabled"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type IRCNetwork struct {
+	Name     string   `json:"name"`
+	Host     string   `json:"host"`
+	Port     int      `json:"port"`
+	TLS      bool     `json:"tls"`
+	Channels []string `json:"channels,omitempty"`
+
+	Nick     string `json:"nick"`
+	Username string `json:"username"`
+	Realname string `json:"realname"`
+
+	NickServ IRCNickServ `json:"nickserv"`
+	SASL     IRCSASL     `json:"sasl"`
+}
+
+type IRCConfig struct {
+	DefaultNick       string       `json:"default_nick"`
+	Networks          []IRCNetwork `json:"networks"`
+	ReverseDCCEnabled bool         `json:"reverse_dcc_enabled"`
+	ReverseDCCPortMin int          `json:"reverse_dcc_port_min,omitempty"`
+	ReverseDCCPortMax int          `json:"reverse_dcc_port_max,omitempty"`
+	AutoRegister      bool         `json:"-"`
+	RegistrationEmail string       `json:"-"`
+}
+
+type IRCSecrets struct {
+	AutoRegister      bool                         `json:"auto_register"`
+	RegistrationEmail string                       `json:"registration_email"`
+	IRC               map[string]IRCNetworkSecrets `json:"irc"`
+}
+
+type IRCNetworkSecrets struct {
+	NickServ IRCNickServSecrets `json:"nickserv"`
+	SASL     IRCSASLSecrets     `json:"sasl"`
+}
+
+type IRCNickServSecrets struct {
+	Password string `json:"password"`
+}
+
+type IRCSASLSecrets struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 type Config struct {
-	// Path to the persisted client.json.
 	ConfigPath string
 
 	ServerBaseURL string
@@ -26,6 +81,7 @@ type Config struct {
 	RevokedAt *time.Time
 
 	DownloadDir string
+	IRC         IRCConfig
 
 	HeartbeatInterval      time.Duration
 	HeartbeatExtendSeconds int
@@ -33,7 +89,6 @@ type Config struct {
 	MaxConcurrentDownloads int
 	LogLevel               string
 
-	// Pairing / lifecycle flags
 	RePair          bool
 	Headless        bool
 	PrintCodeOnly   bool
@@ -41,6 +96,45 @@ type Config struct {
 	OpenBrowser     bool
 	NoBrowser       bool
 	WebUIListenAddr string
+}
+
+func (c IRCConfig) WithDefaults() IRCConfig {
+	if c.Networks == nil {
+		c.Networks = []IRCNetwork{}
+	}
+	c.DefaultNick = strings.TrimSpace(c.DefaultNick)
+	c.RegistrationEmail = strings.TrimSpace(c.RegistrationEmail)
+	if c.ReverseDCCPortMin <= 0 {
+		c.ReverseDCCPortMin = 36080
+	}
+	if c.ReverseDCCPortMax <= 0 {
+		c.ReverseDCCPortMax = c.ReverseDCCPortMin + 10
+	}
+	if c.ReverseDCCPortMax < c.ReverseDCCPortMin {
+		c.ReverseDCCPortMin, c.ReverseDCCPortMax = c.ReverseDCCPortMax, c.ReverseDCCPortMin
+	}
+	for i := range c.Networks {
+		n := &c.Networks[i]
+		n.Name = strings.TrimSpace(n.Name)
+		n.Host = strings.TrimSpace(n.Host)
+		if n.Port <= 0 {
+			if n.TLS {
+				n.Port = 6697
+			} else {
+				n.Port = 6667
+			}
+		}
+		n.Nick = strings.TrimSpace(n.Nick)
+		n.Username = strings.TrimSpace(n.Username)
+		n.Realname = strings.TrimSpace(n.Realname)
+		n.NickServ.Password = strings.TrimSpace(n.NickServ.Password)
+		if n.NickServ.Command == "" {
+			n.NickServ.Command = "IDENTIFY"
+		}
+		n.SASL.Username = strings.TrimSpace(n.SASL.Username)
+		n.SASL.Password = strings.TrimSpace(n.SASL.Password)
+	}
+	return c
 }
 
 func getenv(k, def string) string {
@@ -79,19 +173,14 @@ func boolEnv(k string, def bool) bool {
 
 func Load() Config {
 	var c Config
-
-	// Defaults
 	c.ServerBaseURL = "https://autofetch.de"
 	c.ClientName = "autofetch"
 	c.DownloadDir = "./downloads"
-
-	// Default config path
 	c.ConfigPath = defaultConfigPath()
+	c.IRC = IRCConfig{Networks: []IRCNetwork{}}
 
-	// Load persisted config first (if present)
 	_ = loadFromFile(&c, c.ConfigPath)
 
-	// ENV overrides (only if set)
 	if v := os.Getenv("SERVER_BASE_URL"); v != "" {
 		c.ServerBaseURL = v
 	}
@@ -108,11 +197,9 @@ func Load() Config {
 		c.DownloadDir = v
 	}
 
-	// Recommended: interval 15–30s, extend 600s. Default to 20s for safety.
 	c.HeartbeatInterval = time.Duration(atoiEnv("HEARTBEAT_INTERVAL_SECONDS", 20)) * time.Second
 	c.HeartbeatExtendSeconds = atoiEnv("HEARTBEAT_EXTEND_SECONDS", 600)
 	c.DedupeClaimTTLSeconds = atoiEnv("DEDUPE_CLAIM_TTL_SECONDS", 1800)
-
 	c.MaxConcurrentDownloads = atoiEnv("MAX_CONCURRENT_DOWNLOADS", 1)
 	c.LogLevel = getenv("LOG_LEVEL", "info")
 	c.EnableWebUI = boolEnv("AUTOFETCH_WEBUI", true)
@@ -120,7 +207,6 @@ func Load() Config {
 	c.NoBrowser = boolEnv("AUTOFETCH_NO_BROWSER", false)
 	c.WebUIListenAddr = getenv("AUTOFETCH_WEBUI_ADDR", "127.0.0.1:23324")
 
-	// Flags override everything
 	flag.StringVar(&c.ConfigPath, "config", c.ConfigPath, "Path to client.json")
 	flag.StringVar(&c.ServerBaseURL, "server", c.ServerBaseURL, "SERVER_BASE_URL")
 	flag.StringVar(&c.ClientName, "name", c.ClientName, "CLIENT_NAME")
@@ -143,7 +229,6 @@ func Load() Config {
 
 	flag.Parse()
 	c.HeartbeatInterval = time.Duration(*hbi) * time.Second
-
 	if c.Headless {
 		c.EnableWebUI = false
 		c.OpenBrowser = false
@@ -152,13 +237,9 @@ func Load() Config {
 		c.OpenBrowser = false
 	}
 
-	// If --config points somewhere else than the default, reload persisted config from there,
-	// but do NOT clobber already provided flags.
-	// We only do this when the user explicitly passed --config.
 	if flagPassed("config") {
 		persisted := Config{ConfigPath: c.ConfigPath}
 		_ = loadFromFile(&persisted, c.ConfigPath)
-		// Only fill missing creds from file if flags/env did not provide them.
 		if c.ClientID == "" {
 			c.ClientID = persisted.ClientID
 		}
@@ -171,26 +252,35 @@ func Load() Config {
 		if c.ClientName == "" {
 			c.ClientName = persisted.ClientName
 		}
+		if c.DownloadDir == "" {
+			c.DownloadDir = persisted.DownloadDir
+		}
 		if c.PairedAt == nil {
 			c.PairedAt = persisted.PairedAt
 		}
 		if c.RevokedAt == nil {
 			c.RevokedAt = persisted.RevokedAt
 		}
+		if c.IRC.DefaultNick == "" && len(c.IRC.Networks) == 0 {
+			c.IRC = persisted.IRC.WithDefaults()
+		}
 	}
 
+	c.IRC = c.IRC.WithDefaults()
 	return c
 }
 
-// Persist writes the current config to client.json (credentials + lifecycle markers).
-// It intentionally does not store operational tuning fields (heartbeat intervals, etc.).
 func Persist(c Config) error {
 	if c.ConfigPath == "" {
 		return fmt.Errorf("config path missing")
 	}
-	// Ensure directory exists
 	dir := filepath.Dir(c.ConfigPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	sanitizedIRC, secrets := splitIRCSecrets(c.IRC.WithDefaults())
+	if err := persistIRCSecrets(c.ConfigPath, secrets); err != nil {
 		return err
 	}
 
@@ -202,6 +292,7 @@ func Persist(c Config) error {
 		ClientName    string     `json:"client_name"`
 		DownloadDir   string     `json:"download_dir"`
 		RevokedAt     *time.Time `json:"revoked_at,omitempty"`
+		IRC           IRCConfig  `json:"irc"`
 	}{
 		ServerBaseURL: c.ServerBaseURL,
 		ClientID:      c.ClientID,
@@ -210,14 +301,22 @@ func Persist(c Config) error {
 		ClientName:    c.ClientName,
 		DownloadDir:   c.DownloadDir,
 		RevokedAt:     c.RevokedAt,
+		IRC:           sanitizedIRC,
 	}
-
 	bs, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
 	bs = append(bs, '\n')
-	return os.WriteFile(c.ConfigPath, bs, 0o600)
+	tmpPath := c.ConfigPath + ".tmp"
+	if err := os.WriteFile(tmpPath, bs, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, c.ConfigPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Chmod(c.ConfigPath, 0o600)
 }
 
 func ClearCredentials(c *Config) error {
@@ -238,7 +337,6 @@ func MarkRevoked(c *Config, at time.Time) {
 func defaultConfigPath() string {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
-		// Fallback to current dir
 		return "./client.json"
 	}
 	return filepath.Join(base, "autofetch", "client.json")
@@ -247,12 +345,11 @@ func defaultConfigPath() string {
 func loadFromFile(c *Config, path string) error {
 	bs, err := os.ReadFile(path)
 	if err != nil {
-		if errorsIs(err, fs.ErrNotExist) {
+		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-
 	var payload struct {
 		ServerBaseURL string     `json:"server_base_url"`
 		ClientID      string     `json:"client_id"`
@@ -261,6 +358,7 @@ func loadFromFile(c *Config, path string) error {
 		ClientName    string     `json:"client_name"`
 		DownloadDir   string     `json:"download_dir"`
 		RevokedAt     *time.Time `json:"revoked_at,omitempty"`
+		IRC           IRCConfig  `json:"irc"`
 	}
 	if err := json.Unmarshal(bs, &payload); err != nil {
 		return err
@@ -282,10 +380,155 @@ func loadFromFile(c *Config, path string) error {
 	}
 	c.PairedAt = payload.PairedAt
 	c.RevokedAt = payload.RevokedAt
+	c.IRC = payload.IRC.WithDefaults()
+
+	secrets, err := loadIRCSecrets(path)
+	if err != nil {
+		return err
+	}
+	c.IRC = mergeIRCSecrets(c.IRC, secrets).WithDefaults()
 	return nil
 }
 
-// flagPassed reports whether a CLI flag was explicitly provided.
+func secretsPath(baseConfigPath string) string {
+	if strings.TrimSpace(baseConfigPath) == "" {
+		baseConfigPath = defaultConfigPath()
+	}
+	return filepath.Join(filepath.Dir(baseConfigPath), "irc-secrets.json")
+}
+
+func loadIRCSecrets(baseConfigPath string) (IRCSecrets, error) {
+	path := secretsPath(baseConfigPath)
+	bs, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return IRCSecrets{IRC: map[string]IRCNetworkSecrets{}}, nil
+		}
+		return IRCSecrets{}, err
+	}
+	var secrets IRCSecrets
+	if err := json.Unmarshal(bs, &secrets); err != nil {
+		return IRCSecrets{}, err
+	}
+	if secrets.IRC == nil {
+		secrets.IRC = map[string]IRCNetworkSecrets{}
+	}
+	return secrets, nil
+}
+
+func persistIRCSecrets(baseConfigPath string, secrets IRCSecrets) error {
+	path := secretsPath(baseConfigPath)
+	if secrets.IRC == nil {
+		secrets.IRC = map[string]IRCNetworkSecrets{}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	bs, err := json.MarshalIndent(secrets, "", "  ")
+	if err != nil {
+		return err
+	}
+	bs = append(bs, '\n')
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, bs, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func splitIRCSecrets(ircCfg IRCConfig) (IRCConfig, IRCSecrets) {
+	sanitized := ircCfg.WithDefaults()
+	if len(sanitized.Networks) > 0 {
+		copied := make([]IRCNetwork, len(sanitized.Networks))
+		for i, n := range sanitized.Networks {
+			copied[i] = n
+			if len(n.Channels) > 0 {
+				copied[i].Channels = append([]string(nil), n.Channels...)
+			}
+		}
+		sanitized.Networks = copied
+	}
+	secrets := IRCSecrets{
+		AutoRegister:      sanitized.AutoRegister,
+		RegistrationEmail: strings.TrimSpace(sanitized.RegistrationEmail),
+		IRC:               map[string]IRCNetworkSecrets{},
+	}
+	for i := range sanitized.Networks {
+		n := &sanitized.Networks[i]
+		key := networkSecretKey(*n)
+		if key == "" {
+			continue
+		}
+		var sec IRCNetworkSecrets
+		sec.NickServ.Password = strings.TrimSpace(n.NickServ.Password)
+		sec.SASL.Username = strings.TrimSpace(n.SASL.Username)
+		sec.SASL.Password = strings.TrimSpace(n.SASL.Password)
+		if sec.NickServ.Password != "" || sec.SASL.Username != "" || sec.SASL.Password != "" {
+			secrets.IRC[key] = sec
+		}
+		n.NickServ.Password = ""
+		n.SASL.Password = ""
+		n.SASL.Username = ""
+	}
+	sanitized.AutoRegister = false
+	sanitized.RegistrationEmail = ""
+	return sanitized.WithDefaults(), secrets
+}
+
+func mergeIRCSecrets(ircCfg IRCConfig, secrets IRCSecrets) IRCConfig {
+	merged := ircCfg.WithDefaults()
+	merged.AutoRegister = secrets.AutoRegister
+	merged.RegistrationEmail = strings.TrimSpace(secrets.RegistrationEmail)
+	for i := range merged.Networks {
+		n := &merged.Networks[i]
+		key := networkSecretKey(*n)
+		if key == "" {
+			continue
+		}
+		sec, ok := secrets.IRC[key]
+		if !ok {
+			sec, ok = secrets.IRC[strings.TrimSpace(strings.ToLower(n.Host))]
+		}
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(sec.NickServ.Password) != "" {
+			n.NickServ.Password = strings.TrimSpace(sec.NickServ.Password)
+		}
+		if strings.TrimSpace(sec.SASL.Username) != "" {
+			n.SASL.Username = strings.TrimSpace(sec.SASL.Username)
+		}
+		if strings.TrimSpace(sec.SASL.Password) != "" {
+			n.SASL.Password = strings.TrimSpace(sec.SASL.Password)
+		}
+	}
+	return merged
+}
+
+func networkSecretKey(n IRCNetwork) string {
+	host := strings.TrimSpace(strings.ToLower(n.Host))
+	if host != "" {
+		port := n.Port
+		if port <= 0 {
+			if n.TLS {
+				port = 6697
+			} else {
+				port = 6667
+			}
+		}
+		scheme := "irc"
+		if n.TLS {
+			scheme = "ircs"
+		}
+		return fmt.Sprintf("%s://%s:%d", scheme, host, port)
+	}
+	return strings.TrimSpace(strings.ToLower(n.Name))
+}
+
 func flagPassed(name string) bool {
 	found := false
 	flag.Visit(func(f *flag.Flag) {
@@ -296,15 +539,7 @@ func flagPassed(name string) bool {
 	return found
 }
 
-// errorsIs is a tiny helper to avoid importing errors just for Is.
+// errorsIs keeps compatibility with older config helpers.
 func errorsIs(err, target error) bool {
-	// Go 1.20+ supports errors.Is; keep it local for minimal imports.
-	type iser interface{ Is(error) bool }
-	if err == target {
-		return true
-	}
-	if e, ok := err.(iser); ok {
-		return e.Is(target)
-	}
-	return false
+	return err == target
 }

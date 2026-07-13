@@ -12,7 +12,7 @@ import (
 )
 
 // Version can be overridden at build time with -ldflags "-X main.Version=...".
-var Version = "0.1.0"
+var Version = "1.0.2"
 
 func main() {
 	lock, err := instance.Acquire("autofetch-gui")

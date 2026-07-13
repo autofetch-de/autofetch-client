@@ -12,6 +12,7 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
 	"github.com/autofetch-de/autofetch-client/internal/config"
+	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
 	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
@@ -33,14 +34,12 @@ type stopSignal struct {
 }
 
 func (s *stopSignal) Set(mode stopMode) {
-	if s == nil {
-		return
+	if s != nil {
+		s.mu.Lock()
+		s.mode = mode
+		s.mu.Unlock()
 	}
-	s.mu.Lock()
-	s.mode = mode
-	s.mu.Unlock()
 }
-
 func (s *stopSignal) Mode() stopMode {
 	if s == nil {
 		return ""
@@ -51,15 +50,12 @@ func (s *stopSignal) Mode() stopMode {
 }
 
 type Service struct {
-	mu sync.Mutex
-
-	cfg     *config.Config
-	version string
-
-	api     *api.Client
-	state   *observe.State
-	factory RunnerFactory
-
+	mu         sync.Mutex
+	cfg        *config.Config
+	version    string
+	api        *api.Client
+	state      *observe.State
+	factory    RunnerFactory
 	runCtx     context.Context
 	cancelRun  context.CancelFunc
 	stopSignal *stopSignal
@@ -76,6 +72,14 @@ func (s *Service) Start() error {
 	defer s.mu.Unlock()
 	if s.running || s.pairing {
 		return nil
+	}
+	if s.cfg != nil {
+		s.cfg.IRC = s.cfg.IRC.WithDefaults()
+		if internalirc.EnsureDefaultNick(s.cfg) {
+			if err := config.Persist(*s.cfg); err != nil {
+				return err
+			}
+		}
 	}
 	sig := &stopSignal{}
 	baseCtx := context.WithValue(context.Background(), stopModeGetterContextKey, func() string { return string(sig.Mode()) })
@@ -97,49 +101,34 @@ func (s *Service) Start() error {
 }
 
 func (s *Service) pairAndMaybeRun(ctx context.Context) {
-	defer func() {
-		s.mu.Lock()
-		s.pairing = false
-		s.mu.Unlock()
-	}()
-
+	defer func() { s.mu.Lock(); s.pairing = false; s.mu.Unlock() }()
 	apiClient := api.New(s.cfg.ServerBaseURL, "", "")
 	apiClient.HTTP.Timeout = 60 * time.Second
 	platform := gort.GOOS
 	arch := normalizeArch(gort.GOARCH)
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-
-		start, err := apiClient.RegisterStart(ctx, api.RegisterStartRequest{
-			ClientName: s.cfg.ClientName,
-			Platform:   platform,
-			Arch:       arch,
-			Version:    s.version,
-		})
+		start, err := apiClient.RegisterStart(ctx, api.RegisterStartRequest{ClientName: s.cfg.ClientName, Platform: platform, Arch: arch, Version: s.version})
 		if err != nil {
 			s.state.PairingFailed(err)
 			s.state.Error(err)
 			return
 		}
-
 		s.state.StartPairing(start.PairingCode, strings.TrimRight(s.cfg.ServerBaseURL, "/")+"/clients/new", start.ExpiresAt)
 		pollEvery := time.Duration(start.PollAfterSeconds) * time.Second
 		if pollEvery <= 0 {
 			pollEvery = 3 * time.Second
 		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(pollEvery):
 			}
-
 			res, err := apiClient.RegisterPoll(ctx, api.RegisterPollRequest{PairingID: start.PairingID})
 			if err != nil {
 				s.state.PairingFailed(err)
@@ -201,7 +190,6 @@ func (s *Service) run(r *worker.Runner, ctx context.Context) {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.state.Error(err)
 	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.running = false
@@ -211,10 +199,7 @@ func (s *Service) run(r *worker.Runner, ctx context.Context) {
 	s.state.SetRunning(false)
 }
 
-func (s *Service) Stop() error {
-	return s.Pause()
-}
-
+func (s *Service) Stop() error { return s.Pause() }
 func (s *Service) Pause() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,7 +218,6 @@ func (s *Service) Pause() error {
 	s.state.SetConnected(false)
 	return nil
 }
-
 func (s *Service) Shutdown() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -267,21 +251,18 @@ func (s *Service) StartRePair() error {
 	go func() { _ = s.Start() }()
 	return nil
 }
-
 func (s *Service) Snapshot() observe.Snapshot {
 	if s == nil || s.state == nil {
 		return observe.Snapshot{}
 	}
 	return s.state.Snapshot()
 }
-
 func (s *Service) ConfigPath() string {
 	if s == nil || s.cfg == nil {
 		return ""
 	}
 	return s.cfg.ConfigPath
 }
-
 func (s *Service) DownloadDir() string {
 	if s == nil || s.cfg == nil {
 		return ""
@@ -290,14 +271,36 @@ func (s *Service) DownloadDir() string {
 	defer s.mu.Unlock()
 	return s.cfg.DownloadDir
 }
-
+func (s *Service) IRCConfig() config.IRCConfig {
+	if s == nil || s.cfg == nil {
+		return config.IRCConfig{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.IRC
+}
+func (s *Service) EnsureIRCDefaults() error {
+	s.mu.Lock()
+	if s.cfg == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("config missing")
+	}
+	changed := internalirc.EnsureDefaultNick(s.cfg)
+	s.cfg.IRC = s.cfg.IRC.WithDefaults()
+	if !changed {
+		s.mu.Unlock()
+		return nil
+	}
+	err := config.Persist(*s.cfg)
+	s.mu.Unlock()
+	return err
+}
 func (s *Service) UpdateDownloadDir(dir string) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return fmt.Errorf("download path missing")
 	}
 	dir = filepath.Clean(dir)
-
 	s.mu.Lock()
 	if s.cfg == nil {
 		s.mu.Unlock()
@@ -318,11 +321,42 @@ func (s *Service) UpdateDownloadDir(dir string) error {
 	}
 	return s.Start()
 }
-
+func (s *Service) UpdateLocalSettings(dir string, ircCfg config.IRCConfig, autoRegister bool, registrationEmail string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return fmt.Errorf("download path missing")
+	}
+	dir = filepath.Clean(dir)
+	ircCfg = ircCfg.WithDefaults()
+	ircCfg.AutoRegister = autoRegister
+	ircCfg.RegistrationEmail = strings.TrimSpace(registrationEmail)
+	s.mu.Lock()
+	if s.cfg == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("config missing")
+	}
+	wasActive := s.running || s.pairing
+	s.cfg.DownloadDir = dir
+	s.cfg.IRC = ircCfg
+	if internalirc.EnsureDefaultNick(s.cfg) {
+		s.cfg.IRC = s.cfg.IRC.WithDefaults()
+	}
+	err := config.Persist(*s.cfg)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if !wasActive {
+		return nil
+	}
+	if err := s.Shutdown(); err != nil {
+		return err
+	}
+	return s.Start()
+}
 func (s *Service) TestConnection(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
 	if s.api == nil {
 		err := fmt.Errorf("api client missing")
 		s.state.Error(err)
@@ -335,7 +369,6 @@ func (s *Service) TestConnection(ctx context.Context) error {
 		s.state.SetConnected(false)
 		return err
 	}
-
 	_, _, err := s.api.GetRuntimeConfig(ctx)
 	if err != nil {
 		s.state.Poll(false, time.Now(), err)

@@ -7,10 +7,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
 	"github.com/autofetch-de/autofetch-client/internal/config"
+	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
 	clientruntime "github.com/autofetch-de/autofetch-client/internal/runtime"
 	"github.com/autofetch-de/autofetch-client/internal/worker"
@@ -34,18 +36,23 @@ func Bootstrap(cfg *config.Config, version string) (*Service, *observe.State, er
 	apiClient.HTTP.Timeout = 60 * time.Second
 	dlHTTP := &http.Client{Timeout: 0}
 	clientsCfg := config.LoadClientsConfig()
+	cfg.IRC = cfg.IRC.WithDefaults()
+	if strings.TrimSpace(cfg.IRC.DefaultNick) == "" {
+		legacyNick := strings.TrimSpace(clientsCfg.IRCNick)
+		if legacyNick != "" {
+			cfg.IRC.DefaultNick = legacyNick
+		}
+	}
+	if internalirc.EnsureDefaultNick(cfg) {
+		if err := config.Persist(*cfg); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	state := observe.NewState(cfg.ServerBaseURL, cfg.ClientID, cfg.ClientName, 200)
-	log.SetOutput(io.MultiWriter(os.Stderr, &observe.LogWriter{State: state}))
+	log.SetOutput(io.MultiWriter(os.Stderr, &observe.LogWriter{State: state, Debug: strings.EqualFold(strings.TrimSpace(cfg.LogLevel), "debug") || strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOFETCH_DEBUG")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOFETCH_DEBUG")), "true")}))
 
-	runtimeFallback := clientruntime.Config{
-		PollIntervalSec:         60,
-		MaxParallelDownloads:    cfg.MaxConcurrentDownloads,
-		BandwidthLimitKiBPerSec: 0,
-		HeartbeatIntervalSec:    int(cfg.HeartbeatInterval.Seconds()),
-		HeartbeatExtendSec:      cfg.HeartbeatExtendSeconds,
-		DedupeClaimTTLSec:       cfg.DedupeClaimTTLSeconds,
-	}.WithDefaults()
+	runtimeFallback := clientruntime.Config{PollIntervalSec: 60, MaxParallelDownloads: cfg.MaxConcurrentDownloads, BandwidthLimitKiBPerSec: 0, HeartbeatIntervalSec: int(cfg.HeartbeatInterval.Seconds()), HeartbeatExtendSec: cfg.HeartbeatExtendSeconds, DedupeClaimTTLSec: cfg.DedupeClaimTTLSeconds}.WithDefaults()
 	cfgMgr := clientruntime.NewConfigManager(apiClient, runtimeFallback, func(next clientruntime.Config) {
 		if next.ClientName == "" {
 			return
@@ -73,22 +80,19 @@ func Bootstrap(cfg *config.Config, version string) (*Service, *observe.State, er
 
 	buildRunner := func(obs observe.Observer) *worker.Runner {
 		return &worker.Runner{
-			API:    apiClient,
-			DLHTTP: dlHTTP,
-
-			ClientID: cfg.ClientID,
-
-			DownloadDir: cfg.DownloadDir,
-			IRCNick:     clientsCfg.IRCNick,
-
+			API:               apiClient,
+			DLHTTP:            dlHTTP,
+			ClientID:          cfg.ClientID,
+			DownloadDir:       cfg.DownloadDir,
+			IRCNick:           cfg.IRC.DefaultNick,
+			IRCConfig:         cfg,
+			PersistConfig:     func() error { return config.Persist(*cfg) },
 			HeartbeatInterval: cfg.HeartbeatInterval,
 			HeartbeatExtend:   cfg.HeartbeatExtendSeconds,
 			DedupeTTLSeconds:  cfg.DedupeClaimTTLSeconds,
-
-			RuntimeConfig: cfgMgr,
-			Observer:      obs,
+			RuntimeConfig:     cfgMgr,
+			Observer:          obs,
 		}
 	}
-
 	return NewService(cfg, version, apiClient, state, buildRunner), state, nil
 }

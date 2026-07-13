@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/download"
+	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
 	clientruntime "github.com/autofetch-de/autofetch-client/internal/runtime"
 )
@@ -39,7 +42,9 @@ type Runner struct {
 	DownloadDir string
 
 	// Optional IRC identity (used for XDCC)
-	IRCNick string
+	IRCNick       string
+	IRCConfig     *config.Config
+	PersistConfig func() error
 
 	HeartbeatInterval time.Duration
 	HeartbeatExtend   int
@@ -47,6 +52,8 @@ type Runner struct {
 
 	RuntimeConfig *clientruntime.ConfigManager
 	Observer      observe.Observer
+
+	ircMu sync.Mutex
 }
 
 func (r *Runner) currentRuntimeConfig() clientruntime.Config {
@@ -315,18 +322,142 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 		case "", "single":
 			res, prog, dlErr = download.DownloadToFile(jobCtx, r.DLHTTP, inst.VideoURL, finalPath, inst.ExpectedSize, r.bandwidthLimitBytesPerSec(), prog)
 		case "xdcc":
+			var (
+				ircNick           = r.IRCNick
+				ircUser           = ""
+				ircReal           = ""
+				nsEnabled         bool
+				nsPass            string
+				nsCommand         string
+				saslEnabled       bool
+				saslUser          string
+				saslPass          string
+				autoRegister      bool
+				registrationEmail string
+				reverseDCCEnabled bool
+				dccPortMin        int
+				dccPortMax        int
+				networkIdx        = -1
+				networkNick       = ""
+			)
+			if r.IRCConfig != nil {
+				internalirc.EnsureDefaultNick(r.IRCConfig)
+				r.ircMu.Lock()
+				_, netCfg, changed := internalirc.EnsureNetwork(r.IRCConfig, inst.IRC.Host, inst.IRC.Port, inst.IRC.TLS, inst.IRC.Channel)
+				if netCfg != nil {
+					autoRegister = r.IRCConfig.IRC.AutoRegister
+					registrationEmail = r.IRCConfig.IRC.RegistrationEmail
+					reverseDCCEnabled = r.IRCConfig.IRC.ReverseDCCEnabled
+					dccPortMin = r.IRCConfig.IRC.ReverseDCCPortMin
+					dccPortMax = r.IRCConfig.IRC.ReverseDCCPortMax
+					networkIdx = 0
+					for i := range r.IRCConfig.IRC.Networks {
+						if &r.IRCConfig.IRC.Networks[i] == netCfg {
+							networkIdx = i
+							break
+						}
+					}
+					networkNick = strings.TrimSpace(netCfg.Nick)
+					ircNick = internalirc.EffectiveNick(r.IRCConfig, netCfg)
+					ircUser = netCfg.Username
+					ircReal = netCfg.Realname
+					nsEnabled = netCfg.NickServ.Enabled
+					nsPass = netCfg.NickServ.Password
+					nsCommand = netCfg.NickServ.Command
+					saslEnabled = netCfg.SASL.Enabled
+					saslUser = netCfg.SASL.Username
+					saslPass = netCfg.SASL.Password
+				} else if strings.TrimSpace(ircNick) == "" {
+					ircNick = internalirc.EffectiveNick(r.IRCConfig, nil)
+				}
+				if changed && r.PersistConfig != nil {
+					if err := r.PersistConfig(); err != nil {
+						log.Printf("persist irc network config failed: %v", err)
+					}
+				}
+				r.ircMu.Unlock()
+			}
+
 			prog.Expected = 0
 			res, prog, dlErr = download.DownloadXDCCToFile(jobCtx, download.XDCCOptions{
-				Nick:             r.IRCNick,
-				Host:             inst.IRC.Host,
-				Port:             inst.IRC.Port,
-				TLS:              inst.IRC.TLS,
-				Network:          inst.IRC.Network,
-				JoinChannels:     inst.IRC.PrerequisiteChannels,
-				Channel:          inst.IRC.Channel,
-				Bot:              inst.IRC.Bot,
-				Package:          inst.IRC.Package,
-				ExpectedFilename: inst.IRC.Filename,
+				Nick:              ircNick,
+				Host:              inst.IRC.Host,
+				Port:              inst.IRC.Port,
+				TLS:               inst.IRC.TLS,
+				Network:           inst.IRC.Network,
+				JoinChannels:      inst.IRC.PrerequisiteChannels,
+				Channel:           inst.IRC.Channel,
+				Bot:               inst.IRC.Bot,
+				Package:           inst.IRC.Package,
+				ExpectedFilename:  inst.IRC.Filename,
+				Username:          ircUser,
+				Realname:          ircReal,
+				NickServEnabled:   nsEnabled,
+				NickServPassword:  nsPass,
+				NickServCommand:   nsCommand,
+				SASLEnabled:       saslEnabled,
+				SASLUsername:      saslUser,
+				SASLPassword:      saslPass,
+				AutoRegister:      autoRegister,
+				RegistrationEmail: registrationEmail,
+				ReverseDCCEnabled: reverseDCCEnabled,
+				DCCPortMin:        dccPortMin,
+				DCCPortMax:        dccPortMax,
+				OnNickSelected: func(selected string) {
+					if r.IRCConfig == nil || networkIdx < 0 {
+						return
+					}
+					selected = strings.TrimSpace(selected)
+					if selected == "" {
+						return
+					}
+					r.ircMu.Lock()
+					defer r.ircMu.Unlock()
+					if networkIdx >= len(r.IRCConfig.IRC.Networks) {
+						return
+					}
+					if strings.EqualFold(networkNick, selected) || strings.EqualFold(r.IRCConfig.IRC.Networks[networkIdx].Nick, selected) {
+						return
+					}
+					r.IRCConfig.IRC.Networks[networkIdx].Nick = selected
+					networkNick = selected
+					if r.PersistConfig != nil {
+						if err := r.PersistConfig(); err != nil {
+							log.Printf("persist selected irc nick failed: %v", err)
+						}
+					}
+				},
+				OnRegistered: func(selectedNick, password string) {
+					if r.IRCConfig == nil || networkIdx < 0 {
+						return
+					}
+					selectedNick = strings.TrimSpace(selectedNick)
+					password = strings.TrimSpace(password)
+					if password == "" {
+						return
+					}
+					r.ircMu.Lock()
+					defer r.ircMu.Unlock()
+					if networkIdx >= len(r.IRCConfig.IRC.Networks) {
+						return
+					}
+					n := &r.IRCConfig.IRC.Networks[networkIdx]
+					if selectedNick != "" {
+						n.Nick = selectedNick
+					}
+					n.NickServ.Enabled = true
+					if strings.TrimSpace(n.NickServ.Command) == "" {
+						n.NickServ.Command = "IDENTIFY"
+					}
+					n.NickServ.Password = password
+					r.IRCConfig.IRC.AutoRegister = autoRegister
+					r.IRCConfig.IRC.RegistrationEmail = registrationEmail
+					if r.PersistConfig != nil {
+						if err := r.PersistConfig(); err != nil {
+							log.Printf("persist irc registration credentials failed: %v", err)
+						}
+					}
+				},
 			}, finalPath, r.bandwidthLimitBytesPerSec(), prog)
 		default:
 			dlErr = errors.New("unsupported_mode: " + inst.Mode)
@@ -412,6 +543,126 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				}
 
 				obs.Error(dlErr)
+
+				var gline *download.IRCGLineError
+				if errors.As(dlErr, &gline) {
+					data := map[string]any{
+						"reason":     "IRC_GLINED",
+						"message":    gline.Message,
+						"network":    inst.IRC.Host,
+						"channel":    inst.IRC.Channel,
+						"bot":        inst.IRC.Bot,
+						"retryable":  false,
+						"dedupe_key": dedupeKey,
+					}
+					if gline.RetryAfter > 0 {
+						data["retry_after_seconds"] = int64(gline.RetryAfter / time.Second)
+						data["retry_after_hint"] = gline.RetryAfter.String()
+					}
+					if err := r.completeWithRetry(ctx, job, "FAILED", "irc_glined", data); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
+
+				if errors.Is(dlErr, download.ErrReverseDCCTimeout) {
+					message := dlErr.Error()
+					if idx := strings.Index(message, ": "); idx >= 0 && idx+2 < len(message) {
+						message = message[idx+2:]
+					}
+					if err := r.completeWithRetry(ctx, job, "FAILED", "reverse_dcc_port_forward_required", map[string]any{
+						"reason":     "REVERSE_DCC_PORT_FORWARD_REQUIRED",
+						"message":    message,
+						"network":    inst.IRC.Host,
+						"channel":    inst.IRC.Channel,
+						"bot":        inst.IRC.Bot,
+						"retryable":  false,
+						"dedupe_key": dedupeKey,
+					}); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
+
+				if errors.Is(dlErr, download.ErrReverseDCCDisabled) {
+					message := dlErr.Error()
+					if idx := strings.Index(message, ": "); idx >= 0 && idx+2 < len(message) {
+						message = message[idx+2:]
+					}
+					if err := r.completeWithRetry(ctx, job, "FAILED", "reverse_dcc_disabled", map[string]any{
+						"reason":     "REVERSE_DCC_DISABLED",
+						"message":    message,
+						"network":    inst.IRC.Host,
+						"channel":    inst.IRC.Channel,
+						"bot":        inst.IRC.Bot,
+						"retryable":  false,
+						"dedupe_key": dedupeKey,
+					}); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
+
+				if errors.Is(dlErr, download.ErrIRCRegisteredNickRequired) {
+					if err := r.completeWithRetry(ctx, job, "FAILED", "irc_registered_nick_required", map[string]any{
+						"reason":     "IRC_AUTH_REQUIRED",
+						"message":    dlErr.Error(),
+						"network":    inst.IRC.Host,
+						"channel":    inst.IRC.Channel,
+						"dedupe_key": dedupeKey,
+					}); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
+
+				var incomplete *download.XDCCTransferIncompleteError
+				if errors.As(dlErr, &incomplete) {
+					if err := r.completeWithRetry(ctx, job, "RETRYABLE_ERROR", "xdcc_transfer_incomplete", map[string]any{
+						"reason":         "XDCC_TRANSFER_INCOMPLETE",
+						"message":        dlErr.Error(),
+						"received_bytes": incomplete.Received,
+						"expected_bytes": incomplete.Expected,
+						"network":        inst.IRC.Host,
+						"channel":        inst.IRC.Channel,
+						"bot":            inst.IRC.Bot,
+						"dedupe_key":     dedupeKey,
+					}); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
+
+				if strings.Contains(dlErr.Error(), "xdcc_offer_timeout") {
+					if err := r.completeWithRetry(ctx, job, "NOT_FOUND_YET", "xdcc_offer_timeout", map[string]any{
+						"reason":     "XDCC_OFFER_TIMEOUT",
+						"message":    dlErr.Error(),
+						"network":    inst.IRC.Host,
+						"channel":    inst.IRC.Channel,
+						"bot":        inst.IRC.Bot,
+						"dedupe_key": dedupeKey,
+					}); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
+
+				if strings.Contains(dlErr.Error(), "sasl_auth_failed") || strings.Contains(strings.ToLower(dlErr.Error()), "nickserv identify failed") || strings.Contains(strings.ToLower(dlErr.Error()), "nickserv register failed") {
+					reason := "IRC_AUTH_FAILED"
+					if strings.Contains(dlErr.Error(), "sasl_auth_failed") {
+						reason = "SASL_AUTH_FAILED"
+					}
+					if err := r.completeWithRetry(ctx, job, "FAILED", strings.ToLower(reason), map[string]any{
+						"reason":     reason,
+						"message":    dlErr.Error(),
+						"network":    inst.IRC.Host,
+						"channel":    inst.IRC.Channel,
+						"dedupe_key": dedupeKey,
+					}); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
 
 				if errors.Is(dlErr, download.ErrFilenameMismatch) {
 					if err := r.completeWithRetry(ctx, job, "NOT_FOUND_YET", "filename_mismatch", map[string]any{
@@ -572,11 +823,18 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				serverStopErr = context.Canceled
 				cancel()
 
-				// MVP recommendation: delete .part / meta (avoid accumulating trash for canceled jobs)
+				// Wait until the downloader has actually released its file/socket handles.
+				select {
+				case <-done:
+				case <-time.After(15 * time.Second):
+					log.Printf("download cancel timeout: %s", displayPath)
+				}
+
+				// Explicit user cancellation discards resumable partial data.
 				_ = os.Remove(finalPath + ".part")
 				_ = os.Remove(finalPath + ".part.meta.json")
 
-				// Finalize cancel (server expects this)
+				// Finalize cancel after local shutdown/cleanup.
 				log.Printf("download canceled: %s", displayPath)
 				obs.DownloadFinished(displayPath, serverStopStatus)
 				obs.JobCleared()
