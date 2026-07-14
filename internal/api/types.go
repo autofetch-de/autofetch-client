@@ -5,10 +5,13 @@ import "time"
 // --- Pairing / registration ---
 
 type RegisterStartRequest struct {
-	ClientName string `json:"client_name"`
-	Platform   string `json:"platform"`
-	Arch       string `json:"arch"`
-	Version    string `json:"version"`
+	ClientName  string `json:"client_name"`
+	Platform    string `json:"platform"`
+	Arch        string `json:"arch"`
+	Version     string `json:"version"`
+	Variant     string `json:"variant,omitempty"`
+	BuildCommit string `json:"build_commit,omitempty"`
+	BuildDate   string `json:"build_date,omitempty"`
 }
 
 type RegisterStartResponse struct {
@@ -29,8 +32,18 @@ type RegisterPollResponse struct {
 	ClientToken      string `json:"client_token,omitempty"`
 }
 
+type ClientMetadata struct {
+	Version     string `json:"version,omitempty"`
+	Platform    string `json:"platform,omitempty"`
+	Arch        string `json:"arch,omitempty"`
+	Variant     string `json:"variant,omitempty"`
+	BuildCommit string `json:"build_commit,omitempty"`
+	BuildDate   string `json:"build_date,omitempty"`
+}
+
 type LeaseRequest struct {
 	ClientID string `json:"client_id"`
+	ClientMetadata
 }
 
 type LeaseResponse struct {

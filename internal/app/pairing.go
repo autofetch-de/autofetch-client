@@ -3,11 +3,11 @@ package app
 import (
 	"context"
 	"fmt"
-	gort "runtime"
 	"strings"
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
 )
 
@@ -26,15 +26,18 @@ func normalizeArch(arch string) string {
 	}
 }
 
-func runPairingFlow(cfg *config.Config, version string) error {
+func runPairingFlow(cfg *config.Config, info buildinfo.Info) error {
 	apiClient := api.New(cfg.ServerBaseURL, "", "")
 	apiClient.HTTP.Timeout = 60 * time.Second
 
 	start, err := apiClient.RegisterStart(context.Background(), api.RegisterStartRequest{
-		ClientName: cfg.ClientName,
-		Platform:   gort.GOOS,
-		Arch:       normalizeArch(gort.GOARCH),
-		Version:    version,
+		ClientName:  cfg.ClientName,
+		Platform:    info.Platform,
+		Arch:        info.Arch,
+		Version:     info.Version,
+		Variant:     info.Variant,
+		BuildCommit: info.BuildCommit,
+		BuildDate:   info.BuildDate,
 	})
 	if err != nil {
 		return err

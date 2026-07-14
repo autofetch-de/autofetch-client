@@ -20,7 +20,10 @@ cd "$ROOT"
 OUTDIR="$(cd "$ROOT/.." && pwd)/autofetch-build/dist"
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
-LDFLAGS="-s -w -X main.Version=$VERSION"
+MODULE_PATH="$(go list -m)"
+BUILD_COMMIT="$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)"
+BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+LDFLAGS="-s -w -X ${MODULE_PATH}/internal/buildinfo.Version=${VERSION#v} -X ${MODULE_PATH}/internal/buildinfo.BuildCommit=$BUILD_COMMIT -X ${MODULE_PATH}/internal/buildinfo.BuildDate=$BUILD_DATE"
 
 HOST_GOOS="$(go env GOOS)"
 HOST_GOARCH="$(go env GOARCH)"
@@ -139,7 +142,7 @@ build_headless() {
   fi
 
   env "${env_args[@]}" \
-    go build -trimpath -ldflags "$LDFLAGS" -o "$outdir/autofetch$suffix" ./cmd/autofetch
+    go build -trimpath -ldflags "$LDFLAGS -X ${MODULE_PATH}/internal/buildinfo.Variant=headless" -o "$outdir/autofetch$suffix" ./cmd/autofetch
 }
 
 should_build_gui() {
@@ -243,7 +246,7 @@ build_gui() {
   fi
 
   env "${env_args[@]}" \
-    go build -trimpath -ldflags "$LDFLAGS" -o "$outdir/autofetch-gui$suffix" ./cmd/autofetch-gui
+    go build -trimpath -ldflags "$LDFLAGS -X ${MODULE_PATH}/internal/buildinfo.Variant=headless" -o "$outdir/autofetch-gui$suffix" ./cmd/autofetch-gui
 
   if [[ "$target_goos" == "darwin" ]]; then
     package_macos_app "$outdir"

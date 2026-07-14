@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
@@ -52,7 +53,7 @@ func (s *stopSignal) Mode() stopMode {
 type Service struct {
 	mu         sync.Mutex
 	cfg        *config.Config
-	version    string
+	buildInfo  buildinfo.Info
 	api        *api.Client
 	state      *observe.State
 	factory    RunnerFactory
@@ -63,9 +64,11 @@ type Service struct {
 	pairing    bool
 }
 
-func NewService(cfg *config.Config, version string, apiClient *api.Client, state *observe.State, factory RunnerFactory) *Service {
-	return &Service{cfg: cfg, version: version, api: apiClient, state: state, factory: factory}
+func NewService(cfg *config.Config, info buildinfo.Info, apiClient *api.Client, state *observe.State, factory RunnerFactory) *Service {
+	return &Service{cfg: cfg, buildInfo: info, api: apiClient, state: state, factory: factory}
 }
+
+func (s *Service) BuildInfo() buildinfo.Info { return s.buildInfo }
 
 func (s *Service) Start() error {
 	s.mu.Lock()
@@ -104,15 +107,21 @@ func (s *Service) pairAndMaybeRun(ctx context.Context) {
 	defer func() { s.mu.Lock(); s.pairing = false; s.mu.Unlock() }()
 	apiClient := api.New(s.cfg.ServerBaseURL, "", "")
 	apiClient.HTTP.Timeout = 60 * time.Second
-	platform := gort.GOOS
-	arch := normalizeArch(gort.GOARCH)
+	platform := s.buildInfo.Platform
+	if strings.TrimSpace(platform) == "" {
+		platform = gort.GOOS
+	}
+	arch := s.buildInfo.Arch
+	if strings.TrimSpace(arch) == "" {
+		arch = normalizeArch(gort.GOARCH)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		start, err := apiClient.RegisterStart(ctx, api.RegisterStartRequest{ClientName: s.cfg.ClientName, Platform: platform, Arch: arch, Version: s.version})
+		start, err := apiClient.RegisterStart(ctx, api.RegisterStartRequest{ClientName: s.cfg.ClientName, Platform: platform, Arch: arch, Version: s.buildInfo.Version, Variant: s.buildInfo.Variant, BuildCommit: s.buildInfo.BuildCommit, BuildDate: s.buildInfo.BuildDate})
 		if err != nil {
 			s.state.PairingFailed(err)
 			s.state.Error(err)

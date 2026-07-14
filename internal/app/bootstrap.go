@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
@@ -18,7 +19,7 @@ import (
 	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
 
-func Bootstrap(cfg *config.Config, version string) (*Service, *observe.State, error) {
+func Bootstrap(cfg *config.Config, info buildinfo.Info) (*Service, *observe.State, error) {
 	if cfg.ServerBaseURL == "" {
 		return nil, nil, fmt.Errorf("SERVER_BASE_URL missing")
 	}
@@ -33,6 +34,7 @@ func Bootstrap(cfg *config.Config, version string) (*Service, *observe.State, er
 	}
 
 	apiClient := api.New(cfg.ServerBaseURL, cfg.ClientID, cfg.ClientToken)
+	apiClient.Metadata = api.ClientMetadata{Version: info.Version, Platform: info.Platform, Arch: info.Arch, Variant: info.Variant, BuildCommit: info.BuildCommit, BuildDate: info.BuildDate}
 	apiClient.HTTP.Timeout = 60 * time.Second
 	dlHTTP := &http.Client{Timeout: 0}
 	clientsCfg := config.LoadClientsConfig()
@@ -94,5 +96,5 @@ func Bootstrap(cfg *config.Config, version string) (*Service, *observe.State, er
 			Observer:          obs,
 		}
 	}
-	return NewService(cfg, version, apiClient, state, buildRunner), state, nil
+	return NewService(cfg, info, apiClient, state, buildRunner), state, nil
 }
