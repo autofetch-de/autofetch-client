@@ -18,3 +18,12 @@
 - Configurable IRC networks, nicknames, NickServ, and SASL authentication.
 - Tests for incomplete XDCC transfers, ACK handling, and G-Line detection.
 - MIT license for the public client source code.
+
+## 1.0.3 - 2026-07-14
+
+- Report client version, platform, architecture, variant, commit and build date during lease polling.
+- Log complete build information at startup.
+- Add `--version` support to headless and GUI binaries without starting the GUI.
+- Show the installed version discreetly in the GUI tray menu.
+- Embed and verify release metadata for all GitHub Actions build targets.
+- Preserve the IRC/XDCC reliability and cancellation fixes from 1.0.2.

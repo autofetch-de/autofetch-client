@@ -35,6 +35,7 @@ type Client struct {
 	ClientID    string
 	ClientToken string
 	HTTP        *http.Client
+	Metadata    ClientMetadata
 }
 
 func New(baseURL, clientID, token string) *Client {
@@ -174,7 +175,7 @@ func (c *Client) LeaseJob(ctx context.Context) (*LeaseResponse, error) {
 		ctx,
 		http.MethodPost,
 		"/api/client/v1/jobs/lease",
-		LeaseRequest{ClientID: c.ClientID},
+		LeaseRequest{ClientID: c.ClientID, ClientMetadata: c.Metadata},
 		&out,
 	)
 	return &out, err

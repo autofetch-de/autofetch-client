@@ -61,6 +61,8 @@ func Run(ctx context.Context, svc *app.Service) error {
 		repairPairingItem := fyne.NewMenuItem("Neu koppeln", func() {
 			view.confirmRePair(w, svc)
 		})
+		versionItem := fyne.NewMenuItem("Version "+svc.BuildInfo().Version, func() {})
+		versionItem.Disabled = true
 		quitItem := fyne.NewMenuItem("Beenden", func() {
 			quitting = true
 			_ = svc.Stop()
@@ -76,6 +78,7 @@ func Run(ctx context.Context, svc *app.Service) error {
 			settingsItem,
 			repairPairingItem,
 			fyne.NewMenuItemSeparator(),
+			versionItem,
 			quitItem,
 		)
 		view.trayApp = desk

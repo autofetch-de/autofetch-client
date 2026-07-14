@@ -10,13 +10,14 @@ import (
 
 	"syscall"
 
+	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/webui"
 	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
 
-func Run(cfg config.Config, version string) error {
-	service, _, err := Bootstrap(&cfg, version)
+func Run(cfg config.Config, info buildinfo.Info) error {
+	service, _, err := Bootstrap(&cfg, info)
 	if err != nil {
 		log.Print(err)
 		return nil
@@ -47,7 +48,7 @@ func Run(cfg config.Config, version string) error {
 	}
 
 	if cfg.ClientID == "" || cfg.ClientToken == "" {
-		if err := runPairingFlow(&cfg, version); err != nil {
+		if err := runPairingFlow(&cfg, info); err != nil {
 			return fmt.Errorf("pairing failed: %w", err)
 		}
 		service.api.ClientID = cfg.ClientID

@@ -8,7 +8,10 @@ APP="autofetch"
 OUTDIR="$(cd "$ROOT/.." && pwd)/autofetch-build/dist"
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
 MAIN_PKG="./cmd/autofetch"
-LDFLAGS="-s -w -X main.Version=$VERSION"
+MODULE_PATH="$(go list -m)"
+BUILD_COMMIT="$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)"
+BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+LDFLAGS="-s -w -X ${MODULE_PATH}/internal/buildinfo.Version=${VERSION#v} -X ${MODULE_PATH}/internal/buildinfo.BuildCommit=$BUILD_COMMIT -X ${MODULE_PATH}/internal/buildinfo.BuildDate=$BUILD_DATE"
 
 echo "==> Cleaning dist/"
 rm -rf "$OUTDIR"
@@ -51,7 +54,7 @@ build() {
   fi
 
   env "${env_args[@]}" \
-    go build -trimpath -ldflags "$LDFLAGS" -o "$outfile" "$MAIN_PKG"
+    go build -trimpath -ldflags "$LDFLAGS -X ${MODULE_PATH}/internal/buildinfo.Variant=headless" -o "$outfile" "$MAIN_PKG"
 }
 
 # macOS (Intel)
