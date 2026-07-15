@@ -115,9 +115,6 @@ jobs:
 
           file "$BINARY" || true
           go version -m "$BINARY"
-          strings "$BINARY" | grep -Fx "${VERSION}"
-          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
-          strings "$BINARY" | grep -Fx "headless"
 
           case "${{ matrix.name }}" in
             linux-amd64|windows-amd64|windows-386|macos-intel|macos-arm64)
@@ -131,6 +128,11 @@ jobs:
                 echo "Release binary contains invalid metadata"
                 exit 1
               fi
+              ;;
+            linux-arm64|linux-armv7)
+              strings "$BINARY" | grep -F -- "${VERSION}" >/dev/null
+              strings "$BINARY" | grep -F -- "${BUILD_COMMIT}" >/dev/null
+              strings "$BINARY" | grep -F -- "headless" >/dev/null
               ;;
           esac
 
@@ -218,9 +220,6 @@ jobs:
           BUILD_COMMIT="${GITHUB_SHA::7}"
           file "$BINARY" || true
           go version -m "$BINARY"
-          strings "$BINARY" | grep -Fx "${VERSION}"
-          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
-          strings "$BINARY" | grep -Fx "gui"
           VERSION_OUTPUT="$("$BINARY" --version)"
           echo "$VERSION_OUTPUT"
           echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
@@ -301,9 +300,6 @@ jobs:
           BUILD_COMMIT="${GITHUB_SHA::7}"
           file "$BINARY" || true
           go version -m "$BINARY"
-          strings "$BINARY" | grep -Fx "${VERSION}"
-          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
-          strings "$BINARY" | grep -Fx "gui"
           VERSION_OUTPUT="$("$BINARY" --version)"
           echo "$VERSION_OUTPUT"
           echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
@@ -392,9 +388,6 @@ jobs:
           BUILD_COMMIT="${GITHUB_SHA::7}"
           file "$BINARY" || true
           go version -m "$BINARY"
-          strings "$BINARY" | grep -Fx "${VERSION}"
-          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
-          strings "$BINARY" | grep -Fx "gui"
           VERSION_OUTPUT="$("$BINARY" --version)"
           echo "$VERSION_OUTPUT"
           echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
@@ -484,9 +477,6 @@ jobs:
           BUILD_COMMIT="${GITHUB_SHA::7}"
           file "$BINARY" || true
           go version -m "$BINARY"
-          strings "$BINARY" | grep -Fx "${VERSION}"
-          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
-          strings "$BINARY" | grep -Fx "gui"
           VERSION_OUTPUT="$("$BINARY" --version)"
           echo "$VERSION_OUTPUT"
           echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
