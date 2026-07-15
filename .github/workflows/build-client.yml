@@ -73,8 +73,8 @@ jobs:
 
       - name: Download modules
         run: |
-          go mod tidy
           go mod download
+          go mod verify
 
       - name: Prepare output dir
         shell: bash
@@ -84,8 +84,12 @@ jobs:
       - name: Build headless
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          LDFLAGS="-s -w -X main.Version=${VERSION}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          BUILD_ARCH="${{ matrix.goarch }}"
+          if [ "${{ matrix.goarch }}" = "arm" ] && [ "${{ matrix.goarm }}" = "7" ]; then BUILD_ARCH="armv7"; fi
+          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=headless -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=${{ matrix.goos }} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=${BUILD_ARCH}"
 
           export CGO_ENABLED=0
           export GOOS="${{ matrix.goos }}"
@@ -97,6 +101,38 @@ jobs:
           go build -trimpath -ldflags "$LDFLAGS" \
             -o "dist/${{ matrix.name }}/autofetch${{ matrix.ext }}" \
             ./cmd/autofetch
+
+      - name: Verify binary metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BINARY="dist/${{ matrix.name }}/autofetch${{ matrix.ext }}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          BUILD_ARCH="${{ matrix.goarch }}"
+          if [ "${{ matrix.goarch }}" = "arm" ] && [ "${{ matrix.goarm }}" = "7" ]; then BUILD_ARCH="armv7"; fi
+
+          file "$BINARY" || true
+          go version -m "$BINARY"
+          strings "$BINARY" | grep -Fx "${VERSION}"
+          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
+          strings "$BINARY" | grep -Fx "headless"
+
+          case "${{ matrix.name }}" in
+            linux-amd64|windows-amd64|windows-386|macos-intel|macos-arm64)
+              VERSION_OUTPUT="$("$BINARY" --version)"
+              echo "$VERSION_OUTPUT"
+              echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
+              echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
+              echo "$VERSION_OUTPUT" | grep -Fx "${{ matrix.goos }}/${BUILD_ARCH}"
+              echo "$VERSION_OUTPUT" | grep -Fx "headless"
+              if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then
+                echo "Release binary contains invalid metadata"
+                exit 1
+              fi
+              ;;
+          esac
 
       - name: Generate SHA256
         shell: bash
@@ -151,8 +187,8 @@ jobs:
 
       - name: Download modules
         run: |
-          go mod tidy
           go mod download
+          go mod verify
 
       - name: Prepare output dir
         run: mkdir -p dist/linux-amd64-gui
@@ -160,8 +196,10 @@ jobs:
       - name: Build GUI
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          LDFLAGS="-s -w -X main.Version=${VERSION}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=linux -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=amd64"
 
           export CGO_ENABLED=1
           export GOOS=linux
@@ -170,6 +208,26 @@ jobs:
           go build -trimpath -ldflags "$LDFLAGS" \
             -o "dist/linux-amd64-gui/autofetch-gui" \
             ./cmd/autofetch-gui
+
+      - name: Verify binary metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY="dist/linux-amd64-gui/autofetch-gui"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          file "$BINARY" || true
+          go version -m "$BINARY"
+          strings "$BINARY" | grep -Fx "${VERSION}"
+          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
+          strings "$BINARY" | grep -Fx "gui"
+          VERSION_OUTPUT="$("$BINARY" --version)"
+          echo "$VERSION_OUTPUT"
+          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
+          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
+          echo "$VERSION_OUTPUT" | grep -Fx "linux/amd64"
+          echo "$VERSION_OUTPUT" | grep -Fx "gui"
+          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
 
       - name: Generate SHA256
         shell: bash
@@ -209,8 +267,8 @@ jobs:
       - name: Download modules
         shell: bash
         run: |
-          go mod tidy
           go mod download
+          go mod verify
 
       - name: Prepare output dir
         shell: bash
@@ -221,8 +279,10 @@ jobs:
         env:
           CC: x86_64-w64-mingw32-gcc
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          LDFLAGS="-s -w -X main.Version=${VERSION}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=windows -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=amd64"
 
           export CGO_ENABLED=1
           export GOOS=windows
@@ -231,6 +291,26 @@ jobs:
           go build -trimpath -ldflags "$LDFLAGS" \
             -o "dist/windows-amd64-gui/autofetch-gui.exe" \
             ./cmd/autofetch-gui
+
+      - name: Verify binary metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY="dist/windows-amd64-gui/autofetch-gui.exe"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          file "$BINARY" || true
+          go version -m "$BINARY"
+          strings "$BINARY" | grep -Fx "${VERSION}"
+          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
+          strings "$BINARY" | grep -Fx "gui"
+          VERSION_OUTPUT="$("$BINARY" --version)"
+          echo "$VERSION_OUTPUT"
+          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
+          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
+          echo "$VERSION_OUTPUT" | grep -Fx "windows/amd64"
+          echo "$VERSION_OUTPUT" | grep -Fx "gui"
+          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
 
       - name: Generate SHA256
         shell: bash
@@ -264,8 +344,8 @@ jobs:
 
       - name: Download modules
         run: |
-          go mod tidy
           go mod download
+          go mod verify
 
       - name: Prepare output dir
         run: mkdir -p dist/macos-intel-gui
@@ -273,8 +353,10 @@ jobs:
       - name: Build GUI binary
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          LDFLAGS="-s -w -X main.Version=${VERSION}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=darwin -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=amd64"
 
           export CGO_ENABLED=1
           export GOOS=darwin
@@ -296,9 +378,30 @@ jobs:
             fyne package -os darwin -name autofetch -release
           fi
 
+          cp ../../dist/macos-intel-gui/autofetch-gui autofetch.app/Contents/MacOS/autofetch
           mv autofetch.app ../../dist/macos-intel-gui/autofetch.app
           cd ../../dist/macos-intel-gui
           ditto -c -k --sequesterRsrc --keepParent autofetch.app autofetch-macos-intel-app.zip
+
+      - name: Verify binary metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY="dist/macos-intel-gui/autofetch-gui"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          file "$BINARY" || true
+          go version -m "$BINARY"
+          strings "$BINARY" | grep -Fx "${VERSION}"
+          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
+          strings "$BINARY" | grep -Fx "gui"
+          VERSION_OUTPUT="$("$BINARY" --version)"
+          echo "$VERSION_OUTPUT"
+          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
+          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
+          echo "$VERSION_OUTPUT" | grep -Fx "darwin/amd64"
+          echo "$VERSION_OUTPUT" | grep -Fx "gui"
+          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
 
       - name: Generate SHA256
         shell: bash
@@ -333,8 +436,8 @@ jobs:
 
       - name: Download modules
         run: |
-          go mod tidy
           go mod download
+          go mod verify
 
       - name: Prepare output dir
         run: mkdir -p dist/macos-arm64-gui
@@ -342,8 +445,10 @@ jobs:
       - name: Build GUI binary
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          LDFLAGS="-s -w -X main.Version=${VERSION}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=darwin -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=arm64"
 
           export CGO_ENABLED=1
           export GOOS=darwin
@@ -365,9 +470,30 @@ jobs:
             fyne package -os darwin -name autofetch -release
           fi
 
+          cp ../../dist/macos-arm64-gui/autofetch-gui autofetch.app/Contents/MacOS/autofetch
           mv autofetch.app ../../dist/macos-arm64-gui/autofetch.app
           cd ../../dist/macos-arm64-gui
           ditto -c -k --sequesterRsrc --keepParent autofetch.app autofetch-macos-arm64-app.zip
+
+      - name: Verify binary metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY="dist/macos-arm64-gui/autofetch-gui"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_COMMIT="${GITHUB_SHA::7}"
+          file "$BINARY" || true
+          go version -m "$BINARY"
+          strings "$BINARY" | grep -Fx "${VERSION}"
+          strings "$BINARY" | grep -Fx "${BUILD_COMMIT}"
+          strings "$BINARY" | grep -Fx "gui"
+          VERSION_OUTPUT="$("$BINARY" --version)"
+          echo "$VERSION_OUTPUT"
+          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
+          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
+          echo "$VERSION_OUTPUT" | grep -Fx "darwin/arm64"
+          echo "$VERSION_OUTPUT" | grep -Fx "gui"
+          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
 
       - name: Generate SHA256
         shell: bash
