@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-07-21
+
 ### Added
 
 - Add shared German and English translation catalogs for GUI, system tray, local Web UI and headless pairing output.
