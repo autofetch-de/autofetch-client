@@ -96,6 +96,12 @@ jobs:
             -o "$OUT/autofetch-${{ matrix.language }}${{ matrix.ext }}" \
             ./cmd/autofetch
 
+      - name: Set up QEMU for ARM verification
+        if: matrix.goos == 'linux' && (matrix.goarch == 'arm64' || matrix.goarch == 'arm')
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64,arm
+
       - name: Verify binary metadata
         shell: bash
         run: |
@@ -108,24 +114,14 @@ jobs:
           file "$BINARY" || true
           go version -m "$BINARY"
 
-          case "${{ matrix.name }}" in
-            linux-amd64|windows-amd64|windows-386|macos-intel|macos-arm64)
-              VERSION_OUTPUT="$("$BINARY" --version)"
-              echo "$VERSION_OUTPUT"
-              echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
-              echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
-              echo "$VERSION_OUTPUT" | grep -Fx "${{ matrix.goos }}/${BUILD_ARCH}"
-              echo "$VERSION_OUTPUT" | grep -Fx "headless"
-              echo "$VERSION_OUTPUT" | grep -Fx "language ${{ matrix.language }}"
-              if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
-              ;;
-            *)
-              strings "$BINARY" | grep -F -- "${VERSION}" >/dev/null
-              strings "$BINARY" | grep -F -- "${BUILD_COMMIT}" >/dev/null
-              strings "$BINARY" | grep -F -- "language=${{ matrix.language }}" >/dev/null || \
-                strings "$BINARY" | grep -F -- "language ${{ matrix.language }}" >/dev/null
-              ;;
-          esac
+          VERSION_OUTPUT="$("$BINARY" --version)"
+          echo "$VERSION_OUTPUT"
+          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
+          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
+          echo "$VERSION_OUTPUT" | grep -Fx "${{ matrix.goos }}/${BUILD_ARCH}"
+          echo "$VERSION_OUTPUT" | grep -Fx "headless"
+          echo "$VERSION_OUTPUT" | grep -Fx "language ${{ matrix.language }}"
+          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
 
       - name: Generate SHA256
         shell: bash
