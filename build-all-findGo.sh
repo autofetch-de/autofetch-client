@@ -124,13 +124,14 @@ build_headless() {
   local suffix="${3:-}"
   local outdir="${4:-}"
   local target_goarm="${5:-}"
+  local language="${6:-de}"
 
   if [[ -z "$target_goos" || -z "$target_goarch" || -z "$outdir" ]]; then
     echo "ERROR: build_headless requires GOOS, GOARCH and OUTDIR"
     return 1
   fi
 
-  echo "==> Building headless: autofetch ($target_goos/$target_goarch${target_goarm:+/goarm$target_goarm})"
+  echo "==> Building headless: autofetch-$language ($target_goos/$target_goarch${target_goarm:+/goarm$target_goarm})"
 
   local -a env_args=(
     "CGO_ENABLED=0"
@@ -142,7 +143,7 @@ build_headless() {
   fi
 
   env "${env_args[@]}" \
-    go build -trimpath -ldflags "$LDFLAGS -X ${MODULE_PATH}/internal/buildinfo.Variant=headless" -o "$outdir/autofetch$suffix" ./cmd/autofetch
+    go build -trimpath -ldflags "$LDFLAGS -X ${MODULE_PATH}/internal/buildinfo.Variant=headless -X ${MODULE_PATH}/internal/buildinfo.Language=$language" -o "$outdir/autofetch-$language$suffix" ./cmd/autofetch
 }
 
 should_build_gui() {
@@ -153,6 +154,7 @@ should_build_gui() {
 
 package_macos_app() {
   local outdir="${1:-}"
+  local language="${2:-de}"
 
   if [[ "$HOST_GOOS" != "darwin" ]]; then
     return 0
@@ -170,8 +172,8 @@ package_macos_app() {
   fi
 
   echo "==> Packaging macOS app bundle"
-  rm -rf "$outdir/autofetch.app" "$GUI_DIR/autofetch.app" "$ROOT/autofetch.app"
-  rm -f "$outdir/autofetch-macos-app.zip"
+  rm -rf "$outdir/autofetch-$language.app" "$GUI_DIR/autofetch.app" "$ROOT/autofetch.app"
+  rm -f "$outdir/autofetch-macos-$language-app.zip"
 
   local -a fyne_args=(package -os darwin -name autofetch -release)
   if [[ -n "$ICON_PATH" ]]; then
@@ -197,13 +199,14 @@ package_macos_app() {
   fi
 
   if [[ -n "$packaged_app" ]]; then
-    mv "$packaged_app" "$outdir/autofetch.app"
-    echo "==> Packaged: $outdir/autofetch.app"
+    cp "$outdir/autofetch-gui-$language" "$packaged_app/Contents/MacOS/autofetch"
+    mv "$packaged_app" "$outdir/autofetch-$language.app"
+    echo "==> Packaged: $outdir/autofetch-$language.app"
 
     if command -v ditto >/dev/null 2>&1; then
       echo "==> Creating macOS app archive"
-      ditto -c -k --sequesterRsrc --keepParent "$outdir/autofetch.app" "$outdir/autofetch-macos-app.zip"
-      echo "==> Archived: $outdir/autofetch-macos-app.zip"
+      ditto -c -k --sequesterRsrc --keepParent "$outdir/autofetch-$language.app" "$outdir/autofetch-macos-$language-app.zip"
+      echo "==> Archived: $outdir/autofetch-macos-$language-app.zip"
     else
       echo "WARNING: ditto not found; skipping macOS app zip archive"
     fi
@@ -218,6 +221,7 @@ build_gui() {
   local suffix="${3:-}"
   local outdir="${4:-}"
   local target_goarm="${5:-}"
+  local language="${6:-de}"
 
   if ! should_build_gui "$target_goos" "$target_goarch"; then
     echo "==> Skipping GUI: autofetch-gui ($target_goos/$target_goarch${target_goarm:+/goarm$target_goarm})"
@@ -225,7 +229,7 @@ build_gui() {
     return 0
   fi
 
-  echo "==> Building GUI: autofetch-gui ($target_goos/$target_goarch${target_goarm:+/goarm$target_goarm})"
+  echo "==> Building GUI: autofetch-gui-$language ($target_goos/$target_goarch${target_goarm:+/goarm$target_goarm})"
 
   local -a env_args=(
     "CGO_ENABLED=1"
@@ -246,10 +250,10 @@ build_gui() {
   fi
 
   env "${env_args[@]}" \
-    go build -trimpath -ldflags "$LDFLAGS -X ${MODULE_PATH}/internal/buildinfo.Variant=headless" -o "$outdir/autofetch-gui$suffix" ./cmd/autofetch-gui
+    go build -trimpath -ldflags "$LDFLAGS -X ${MODULE_PATH}/internal/buildinfo.Variant=gui -X ${MODULE_PATH}/internal/buildinfo.Language=$language" -o "$outdir/autofetch-gui-$language$suffix" ./cmd/autofetch-gui
 
   if [[ "$target_goos" == "darwin" ]]; then
-    package_macos_app "$outdir"
+    package_macos_app "$outdir" "$language"
   fi
 }
 
@@ -299,13 +303,15 @@ build_pkg() {
     target="$target-goarm$target_goarm"
   fi
 
-  local outdir="$OUTDIR/$target"
-  mkdir -p "$outdir"
+  for language in de en; do
+    local outdir="$OUTDIR/$target-$language"
+    mkdir -p "$outdir"
 
-  echo "==> Building target: $target"
+    echo "==> Building target: $target-$language"
 
-  build_headless "$target_goos" "$target_goarch" "$suffix" "$outdir" "$target_goarm"
-  build_gui "$target_goos" "$target_goarch" "$suffix" "$outdir" "$target_goarm"
+    build_headless "$target_goos" "$target_goarch" "$suffix" "$outdir" "$target_goarm" "$language"
+    build_gui "$target_goos" "$target_goarch" "$suffix" "$outdir" "$target_goarm" "$language"
+  done
 }
 
 # Build native host target

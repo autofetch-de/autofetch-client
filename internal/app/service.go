@@ -14,6 +14,7 @@ import (
 	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
+	"github.com/autofetch-de/autofetch-client/internal/localization"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
 	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
@@ -56,6 +57,7 @@ type Service struct {
 	buildInfo  buildinfo.Info
 	api        *api.Client
 	state      *observe.State
+	localizer  *localization.Localizer
 	factory    RunnerFactory
 	runCtx     context.Context
 	cancelRun  context.CancelFunc
@@ -65,10 +67,16 @@ type Service struct {
 }
 
 func NewService(cfg *config.Config, info buildinfo.Info, apiClient *api.Client, state *observe.State, factory RunnerFactory) *Service {
-	return &Service{cfg: cfg, buildInfo: info, api: apiClient, state: state, factory: factory}
+	return &Service{cfg: cfg, buildInfo: info, api: apiClient, state: state, localizer: localization.New(info.Language), factory: factory}
 }
 
 func (s *Service) BuildInfo() buildinfo.Info { return s.buildInfo }
+func (s *Service) Localizer() *localization.Localizer {
+	if s == nil || s.localizer == nil {
+		return localization.New(localization.English)
+	}
+	return s.localizer
+}
 
 func (s *Service) Start() error {
 	s.mu.Lock()
@@ -146,7 +154,7 @@ func (s *Service) pairAndMaybeRun(ctx context.Context) {
 			}
 			switch res.Status {
 			case "PENDING":
-				s.state.PairingPending("Warte auf Bestätigung")
+				s.state.PairingPending(observe.StatusPairingWaiting)
 				if res.PollAfterSeconds > 0 {
 					pollEvery = time.Duration(res.PollAfterSeconds) * time.Second
 				}
@@ -178,10 +186,10 @@ func (s *Service) pairAndMaybeRun(ctx context.Context) {
 				s.run(r, ctx)
 				return
 			case "EXPIRED":
-				s.state.PairingPending("Code abgelaufen, neuer Code wird erstellt")
+				s.state.PairingPending(observe.StatusPairingExpiredNewCode)
 				goto NEWPAIR
 			case "REJECTED":
-				s.state.PairingPending("Pairing abgelehnt, neuer Code wird erstellt")
+				s.state.PairingPending(observe.StatusPairingRejectedNewCode)
 				goto NEWPAIR
 			default:
 				err := fmt.Errorf("unknown pairing status: %s", res.Status)

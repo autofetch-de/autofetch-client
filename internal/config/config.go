@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/autofetch-de/autofetch-client/internal/localization"
 )
 
 type IRCNickServ struct {
@@ -171,7 +173,10 @@ func boolEnv(k string, def bool) bool {
 	}
 }
 
-func Load() Config {
+func Load(l *localization.Localizer) Config {
+	if l == nil {
+		l = localization.New(localization.English)
+	}
 	var c Config
 	c.ServerBaseURL = "https://autofetch.de"
 	c.ClientName = "autofetch"
@@ -207,19 +212,19 @@ func Load() Config {
 	c.NoBrowser = boolEnv("AUTOFETCH_NO_BROWSER", false)
 	c.WebUIListenAddr = getenv("AUTOFETCH_WEBUI_ADDR", "127.0.0.1:23324")
 
-	flag.StringVar(&c.ConfigPath, "config", c.ConfigPath, "Path to client.json")
+	flag.StringVar(&c.ConfigPath, "config", c.ConfigPath, l.T("flag.config"))
 	flag.StringVar(&c.ServerBaseURL, "server", c.ServerBaseURL, "SERVER_BASE_URL")
 	flag.StringVar(&c.ClientName, "name", c.ClientName, "CLIENT_NAME")
 	flag.StringVar(&c.ClientID, "client-id", c.ClientID, "CLIENT_ID (uuid)")
 	flag.StringVar(&c.ClientToken, "token", c.ClientToken, "CLIENT_TOKEN (X-Client-Token)")
 	flag.StringVar(&c.DownloadDir, "dir", c.DownloadDir, "DOWNLOAD_DIR")
-	flag.BoolVar(&c.RePair, "re-pair", false, "Start pairing flow (discard stored client_id/token and register this device again)")
-	flag.BoolVar(&c.PrintCodeOnly, "print-code-only", false, "Print pairing code only (headless pairing UX)")
-	flag.BoolVar(&c.EnableWebUI, "webui", c.EnableWebUI, "Enable local status Web UI")
-	flag.BoolVar(&c.Headless, "headless", false, "Run without UI/tray (headless mode)")
-	flag.BoolVar(&c.OpenBrowser, "open-browser", c.OpenBrowser, "Open the local status Web UI in a browser")
-	flag.BoolVar(&c.NoBrowser, "no-browser", c.NoBrowser, "Do not open the local status Web UI in a browser")
-	flag.StringVar(&c.WebUIListenAddr, "webui-addr", c.WebUIListenAddr, "Listen address for local status Web UI")
+	flag.BoolVar(&c.RePair, "re-pair", false, l.T("flag.repair"))
+	flag.BoolVar(&c.PrintCodeOnly, "print-code-only", false, l.T("flag.print_code_only"))
+	flag.BoolVar(&c.EnableWebUI, "webui", c.EnableWebUI, l.T("flag.webui"))
+	flag.BoolVar(&c.Headless, "headless", false, l.T("flag.headless"))
+	flag.BoolVar(&c.OpenBrowser, "open-browser", c.OpenBrowser, l.T("flag.open_browser"))
+	flag.BoolVar(&c.NoBrowser, "no-browser", c.NoBrowser, l.T("flag.no_browser"))
+	flag.StringVar(&c.WebUIListenAddr, "webui-addr", c.WebUIListenAddr, l.T("flag.webui_addr"))
 
 	hbi := flag.Int("heartbeat-interval", int(c.HeartbeatInterval.Seconds()), "HEARTBEAT_INTERVAL_SECONDS")
 	flag.IntVar(&c.HeartbeatExtendSeconds, "heartbeat-extend", c.HeartbeatExtendSeconds, "HEARTBEAT_EXTEND_SECONDS")

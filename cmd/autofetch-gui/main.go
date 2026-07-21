@@ -12,6 +12,7 @@ import (
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/desktop"
 	"github.com/autofetch-de/autofetch-client/internal/instance"
+	"github.com/autofetch-de/autofetch-client/internal/localization"
 )
 
 func main() {
@@ -23,25 +24,28 @@ func main() {
 	for _, line := range info.StartLogLines() {
 		log.Print(line)
 	}
+	l := localization.New(info.Language)
 	lock, err := instance.Acquire("autofetch-gui")
 	if err != nil {
 		if errors.Is(err, instance.ErrAlreadyRunning) {
-			log.Fatal("autofetch-gui läuft bereits")
+			log.Fatal(l.T("cli.gui_already_running"))
 		}
 		log.Fatal(err)
 	}
 	defer func() { _ = lock.Release() }()
-	cfg := config.Load()
+	cfg := config.Load(l)
 	cfg.EnableWebUI = false
 	cfg.OpenBrowser = false
 	cfg.NoBrowser = true
 	cfg.Headless = false
 	svc, _, err := app.Bootstrap(&cfg, info)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("client bootstrap failed: %v", err)
+		log.Fatal(l.UserError(err.Error()))
 	}
 	if err := desktop.Run(context.Background(), svc); err != nil {
-		log.Fatal(err)
+		log.Printf("desktop client stopped with error: %v", err)
+		log.Fatal(l.UserError(err.Error()))
 	}
 }
 func hasVersionFlag(args []string) bool {

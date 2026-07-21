@@ -10,55 +10,53 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GUI test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev libasound2-dev mesa-common-dev
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify modules
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Run tests
+        run: go test ./...
+
   build-headless:
-    name: headless-${{ matrix.name }}
+    needs: test
+    name: headless-${{ matrix.name }}-${{ matrix.language }}
     runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: linux-amd64
-            runs_on: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            goarm: ""
-            ext: ""
-          - name: linux-arm64
-            runs_on: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            goarm: ""
-            ext: ""
-          - name: linux-armv7
-            runs_on: ubuntu-latest
-            goos: linux
-            goarch: arm
-            goarm: "7"
-            ext: ""
-          - name: windows-amd64
-            runs_on: windows-latest
-            goos: windows
-            goarch: amd64
-            goarm: ""
-            ext: ".exe"
-          - name: windows-386
-            runs_on: windows-latest
-            goos: windows
-            goarch: "386"
-            goarm: ""
-            ext: ".exe"
-          - name: macos-intel
-            runs_on: macos-15-intel
-            goos: darwin
-            goarch: amd64
-            goarm: ""
-            ext: ""
-          - name: macos-arm64
-            runs_on: macos-latest
-            goos: darwin
-            goarch: arm64
-            goarm: ""
-            ext: ""
+          - { name: linux-amd64, runs_on: ubuntu-latest, goos: linux, goarch: amd64, goarm: "", ext: "", language: de }
+          - { name: linux-amd64, runs_on: ubuntu-latest, goos: linux, goarch: amd64, goarm: "", ext: "", language: en }
+          - { name: linux-arm64, runs_on: ubuntu-latest, goos: linux, goarch: arm64, goarm: "", ext: "", language: de }
+          - { name: linux-arm64, runs_on: ubuntu-latest, goos: linux, goarch: arm64, goarm: "", ext: "", language: en }
+          - { name: linux-armv7, runs_on: ubuntu-latest, goos: linux, goarch: arm, goarm: "7", ext: "", language: de }
+          - { name: linux-armv7, runs_on: ubuntu-latest, goos: linux, goarch: arm, goarm: "7", ext: "", language: en }
+          - { name: windows-amd64, runs_on: windows-latest, goos: windows, goarch: amd64, goarm: "", ext: ".exe", language: de }
+          - { name: windows-amd64, runs_on: windows-latest, goos: windows, goarch: amd64, goarm: "", ext: ".exe", language: en }
+          - { name: windows-386, runs_on: windows-latest, goos: windows, goarch: "386", goarm: "", ext: ".exe", language: de }
+          - { name: windows-386, runs_on: windows-latest, goos: windows, goarch: "386", goarm: "", ext: ".exe", language: en }
+          - { name: macos-intel, runs_on: macos-15-intel, goos: darwin, goarch: amd64, goarm: "", ext: "", language: de }
+          - { name: macos-intel, runs_on: macos-15-intel, goos: darwin, goarch: amd64, goarm: "", ext: "", language: en }
+          - { name: macos-arm64, runs_on: macos-latest, goos: darwin, goarch: arm64, goarm: "", ext: "", language: de }
+          - { name: macos-arm64, runs_on: macos-latest, goos: darwin, goarch: arm64, goarm: "", ext: "", language: en }
 
     steps:
       - name: Checkout
@@ -76,43 +74,37 @@ jobs:
           go mod download
           go mod verify
 
-      - name: Prepare output dir
-        shell: bash
-        run: |
-          mkdir -p dist/${{ matrix.name }}
-
       - name: Build headless
         shell: bash
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           BUILD_COMMIT="${GITHUB_SHA::7}"
           BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           BUILD_ARCH="${{ matrix.goarch }}"
           if [ "${{ matrix.goarch }}" = "arm" ] && [ "${{ matrix.goarm }}" = "7" ]; then BUILD_ARCH="armv7"; fi
-          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=headless -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=${{ matrix.goos }} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=${BUILD_ARCH}"
+          OUT="dist/${{ matrix.name }}-${{ matrix.language }}"
+          mkdir -p "$OUT"
+          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=headless -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Language=${{ matrix.language }} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=${{ matrix.goos }} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=${BUILD_ARCH}"
 
           export CGO_ENABLED=0
           export GOOS="${{ matrix.goos }}"
           export GOARCH="${{ matrix.goarch }}"
-          if [ -n "${{ matrix.goarm }}" ]; then
-            export GOARM="${{ matrix.goarm }}"
-          fi
+          if [ -n "${{ matrix.goarm }}" ]; then export GOARM="${{ matrix.goarm }}"; fi
 
           go build -trimpath -ldflags "$LDFLAGS" \
-            -o "dist/${{ matrix.name }}/autofetch${{ matrix.ext }}" \
+            -o "$OUT/autofetch-${{ matrix.language }}${{ matrix.ext }}" \
             ./cmd/autofetch
 
       - name: Verify binary metadata
         shell: bash
         run: |
           set -euo pipefail
-
-          BINARY="dist/${{ matrix.name }}/autofetch${{ matrix.ext }}"
+          BINARY="dist/${{ matrix.name }}-${{ matrix.language }}/autofetch-${{ matrix.language }}${{ matrix.ext }}"
           VERSION="${GITHUB_REF_NAME#v}"
           BUILD_COMMIT="${GITHUB_SHA::7}"
           BUILD_ARCH="${{ matrix.goarch }}"
           if [ "${{ matrix.goarch }}" = "arm" ] && [ "${{ matrix.goarm }}" = "7" ]; then BUILD_ARCH="armv7"; fi
-
           file "$BINARY" || true
           go version -m "$BINARY"
 
@@ -124,40 +116,48 @@ jobs:
               echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
               echo "$VERSION_OUTPUT" | grep -Fx "${{ matrix.goos }}/${BUILD_ARCH}"
               echo "$VERSION_OUTPUT" | grep -Fx "headless"
-              if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then
-                echo "Release binary contains invalid metadata"
-                exit 1
-              fi
+              echo "$VERSION_OUTPUT" | grep -Fx "language ${{ matrix.language }}"
+              if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
               ;;
-            linux-arm64|linux-armv7)
+            *)
               strings "$BINARY" | grep -F -- "${VERSION}" >/dev/null
               strings "$BINARY" | grep -F -- "${BUILD_COMMIT}" >/dev/null
-              strings "$BINARY" | grep -F -- "headless" >/dev/null
+              strings "$BINARY" | grep -F -- "language=${{ matrix.language }}" >/dev/null || \
+                strings "$BINARY" | grep -F -- "language ${{ matrix.language }}" >/dev/null
               ;;
           esac
 
       - name: Generate SHA256
         shell: bash
         run: |
-          cd "dist/${{ matrix.name }}"
+          cd "dist/${{ matrix.name }}-${{ matrix.language }}"
           for f in *; do
             [ -f "$f" ] || continue
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "$f" > "$f.sha256"
-            else
-              shasum -a 256 "$f" > "$f.sha256"
-            fi
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
           done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: headless-${{ matrix.name }}
-          path: dist/${{ matrix.name }}/
+          name: headless-${{ matrix.name }}-${{ matrix.language }}
+          path: dist/${{ matrix.name }}-${{ matrix.language }}/
 
-  build-gui-linux:
-    name: gui-linux-amd64
-    runs-on: ubuntu-latest
+  build-gui:
+    needs: test
+    name: gui-${{ matrix.name }}-${{ matrix.language }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, runs_on: ubuntu-latest, goos: linux, goarch: amd64, ext: "", language: de, cc: gcc }
+          - { name: linux-amd64, runs_on: ubuntu-latest, goos: linux, goarch: amd64, ext: "", language: en, cc: gcc }
+          - { name: windows-amd64, runs_on: windows-latest, goos: windows, goarch: amd64, ext: ".exe", language: de, cc: x86_64-w64-mingw32-gcc }
+          - { name: windows-amd64, runs_on: windows-latest, goos: windows, goarch: amd64, ext: ".exe", language: en, cc: x86_64-w64-mingw32-gcc }
+          - { name: macos-intel, runs_on: macos-15-intel, goos: darwin, goarch: amd64, ext: "", language: de, cc: clang }
+          - { name: macos-intel, runs_on: macos-15-intel, goos: darwin, goarch: amd64, ext: "", language: en, cc: clang }
+          - { name: macos-arm64, runs_on: macos-latest, goos: darwin, goarch: arm64, ext: "", language: de, cc: clang }
+          - { name: macos-arm64, runs_on: macos-latest, goos: darwin, goarch: arm64, ext: "", language: en, cc: clang }
 
     steps:
       - name: Checkout
@@ -165,92 +165,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Linux GUI deps
+      - name: Install Linux GUI dependencies
+        if: matrix.goos == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc \
-            pkg-config \
-            libgl1-mesa-dev \
-            xorg-dev \
-            libx11-dev \
-            libxcursor-dev \
-            libxrandr-dev \
-            libxinerama-dev \
-            libxi-dev \
-            libxxf86vm-dev \
-            libasound2-dev \
-            mesa-common-dev
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Download modules
-        run: |
-          go mod download
-          go mod verify
-
-      - name: Prepare output dir
-        run: mkdir -p dist/linux-amd64-gui
-
-      - name: Build GUI
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          BUILD_COMMIT="${GITHUB_SHA::7}"
-          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=linux -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=amd64"
-
-          export CGO_ENABLED=1
-          export GOOS=linux
-          export GOARCH=amd64
-
-          go build -trimpath -ldflags "$LDFLAGS" \
-            -o "dist/linux-amd64-gui/autofetch-gui" \
-            ./cmd/autofetch-gui
-
-      - name: Verify binary metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          BINARY="dist/linux-amd64-gui/autofetch-gui"
-          VERSION="${GITHUB_REF_NAME#v}"
-          BUILD_COMMIT="${GITHUB_SHA::7}"
-          file "$BINARY" || true
-          go version -m "$BINARY"
-          VERSION_OUTPUT="$("$BINARY" --version)"
-          echo "$VERSION_OUTPUT"
-          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
-          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
-          echo "$VERSION_OUTPUT" | grep -Fx "linux/amd64"
-          echo "$VERSION_OUTPUT" | grep -Fx "gui"
-          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
-
-      - name: Generate SHA256
-        shell: bash
-        run: |
-          cd dist/linux-amd64-gui
-          sha256sum autofetch-gui > autofetch-gui.sha256
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-linux-amd64
-          path: dist/linux-amd64-gui/
-
-  build-gui-windows:
-    name: gui-windows-amd64
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev libasound2-dev mesa-common-dev
 
       - name: Setup MSYS2
+        if: matrix.goos == 'windows'
         uses: msys2/setup-msys2@v2
         with:
           update: true
@@ -263,127 +185,55 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install Fyne CLI
+        if: matrix.goos == 'darwin'
+        run: go install fyne.io/tools/cmd/fyne@latest
+
       - name: Download modules
         shell: bash
         run: |
           go mod download
           go mod verify
-
-      - name: Prepare output dir
-        shell: bash
-        run: mkdir -p dist/windows-amd64-gui
 
       - name: Build GUI
         shell: bash
         env:
-          CC: x86_64-w64-mingw32-gcc
+          CC: ${{ matrix.cc }}
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           BUILD_COMMIT="${GITHUB_SHA::7}"
           BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=windows -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=amd64"
+          OUT="dist/${{ matrix.name }}-gui-${{ matrix.language }}"
+          mkdir -p "$OUT"
+          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Language=${{ matrix.language }} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=${{ matrix.goos }} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=${{ matrix.goarch }}"
 
           export CGO_ENABLED=1
-          export GOOS=windows
-          export GOARCH=amd64
-
+          export GOOS="${{ matrix.goos }}"
+          export GOARCH="${{ matrix.goarch }}"
           go build -trimpath -ldflags "$LDFLAGS" \
-            -o "dist/windows-amd64-gui/autofetch-gui.exe" \
+            -o "$OUT/autofetch-gui-${{ matrix.language }}${{ matrix.ext }}" \
             ./cmd/autofetch-gui
 
-      - name: Verify binary metadata
+      - name: Package macOS app
+        if: matrix.goos == 'darwin'
         shell: bash
         run: |
           set -euo pipefail
-          BINARY="dist/windows-amd64-gui/autofetch-gui.exe"
-          VERSION="${GITHUB_REF_NAME#v}"
-          BUILD_COMMIT="${GITHUB_SHA::7}"
-          file "$BINARY" || true
-          go version -m "$BINARY"
-          VERSION_OUTPUT="$("$BINARY" --version)"
-          echo "$VERSION_OUTPUT"
-          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
-          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
-          echo "$VERSION_OUTPUT" | grep -Fx "windows/amd64"
-          echo "$VERSION_OUTPUT" | grep -Fx "gui"
-          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
-
-      - name: Generate SHA256
-        shell: bash
-        run: |
-          cd dist/windows-amd64-gui
-          certutil -hashfile autofetch-gui.exe SHA256 | sed -n '2p' | tr -d ' \r' | awk '{print tolower($0) "  autofetch-gui.exe"}' > autofetch-gui.exe.sha256
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-windows-amd64
-          path: dist/windows-amd64-gui/
-
-  build-gui-macos-intel:
-    name: gui-macos-intel
-    runs-on: macos-15-intel
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install Fyne CLI
-        run: go install fyne.io/tools/cmd/fyne@latest
-
-      - name: Download modules
-        run: |
-          go mod download
-          go mod verify
-
-      - name: Prepare output dir
-        run: mkdir -p dist/macos-intel-gui
-
-      - name: Build GUI binary
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          BUILD_COMMIT="${GITHUB_SHA::7}"
-          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=darwin -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=amd64"
-
-          export CGO_ENABLED=1
-          export GOOS=darwin
-          export GOARCH=amd64
-
-          go build -trimpath -ldflags "$LDFLAGS" \
-            -o "dist/macos-intel-gui/autofetch-gui" \
-            ./cmd/autofetch-gui
-
-      - name: Package .app
-        shell: bash
-        run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
-
+          OUT="dist/${{ matrix.name }}-gui-${{ matrix.language }}"
           cd cmd/autofetch-gui
-          if [ -f ../../Icon.png ]; then
-            fyne package -os darwin -name autofetch -release -icon ../../Icon.png
-          else
-            fyne package -os darwin -name autofetch -release
-          fi
-
-          cp ../../dist/macos-intel-gui/autofetch-gui autofetch.app/Contents/MacOS/autofetch
-          mv autofetch.app ../../dist/macos-intel-gui/autofetch.app
-          cd ../../dist/macos-intel-gui
-          ditto -c -k --sequesterRsrc --keepParent autofetch.app autofetch-macos-intel-app.zip
+          if [ -f ../../Icon.png ]; then fyne package -os darwin -name autofetch -release -icon ../../Icon.png; else fyne package -os darwin -name autofetch -release; fi
+          cp "../../$OUT/autofetch-gui-${{ matrix.language }}" autofetch.app/Contents/MacOS/autofetch
+          mv autofetch.app "../../$OUT/autofetch-${{ matrix.language }}.app"
+          cd "../../$OUT"
+          ditto -c -k --sequesterRsrc --keepParent "autofetch-${{ matrix.language }}.app" "autofetch-${{ matrix.name }}-${{ matrix.language }}-app.zip"
 
       - name: Verify binary metadata
         shell: bash
         run: |
           set -euo pipefail
-          BINARY="dist/macos-intel-gui/autofetch-gui"
+          BINARY="dist/${{ matrix.name }}-gui-${{ matrix.language }}/autofetch-gui-${{ matrix.language }}${{ matrix.ext }}"
           VERSION="${GITHUB_REF_NAME#v}"
           BUILD_COMMIT="${GITHUB_SHA::7}"
           file "$BINARY" || true
@@ -392,121 +242,32 @@ jobs:
           echo "$VERSION_OUTPUT"
           echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
           echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
-          echo "$VERSION_OUTPUT" | grep -Fx "darwin/amd64"
+          echo "$VERSION_OUTPUT" | grep -Fx "${{ matrix.goos }}/${{ matrix.goarch }}"
           echo "$VERSION_OUTPUT" | grep -Fx "gui"
+          echo "$VERSION_OUTPUT" | grep -Fx "language ${{ matrix.language }}"
           if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
 
       - name: Generate SHA256
         shell: bash
         run: |
-          cd dist/macos-intel-gui
-          shasum -a 256 autofetch-gui > autofetch-gui.sha256
-          shasum -a 256 autofetch-macos-intel-app.zip > autofetch-macos-intel-app.zip.sha256
+          cd "dist/${{ matrix.name }}-gui-${{ matrix.language }}"
+          for f in *; do
+            [ -f "$f" ] || continue
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gui-macos-intel
-          path: dist/macos-intel-gui/
-
-  build-gui-macos-arm64:
-    name: gui-macos-arm64
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install Fyne CLI
-        run: go install fyne.io/tools/cmd/fyne@latest
-
-      - name: Download modules
-        run: |
-          go mod download
-          go mod verify
-
-      - name: Prepare output dir
-        run: mkdir -p dist/macos-arm64-gui
-
-      - name: Build GUI binary
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          BUILD_COMMIT="${GITHUB_SHA::7}"
-          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          LDFLAGS="-s -w -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Version=${VERSION} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildCommit=${BUILD_COMMIT} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.BuildDate=${BUILD_DATE} -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Variant=gui -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Platform=darwin -X github.com/autofetch-de/autofetch-client/internal/buildinfo.Arch=arm64"
-
-          export CGO_ENABLED=1
-          export GOOS=darwin
-          export GOARCH=arm64
-
-          go build -trimpath -ldflags "$LDFLAGS" \
-            -o "dist/macos-arm64-gui/autofetch-gui" \
-            ./cmd/autofetch-gui
-
-      - name: Package .app
-        shell: bash
-        run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
-
-          cd cmd/autofetch-gui
-          if [ -f ../../Icon.png ]; then
-            fyne package -os darwin -name autofetch -release -icon ../../Icon.png
-          else
-            fyne package -os darwin -name autofetch -release
-          fi
-
-          cp ../../dist/macos-arm64-gui/autofetch-gui autofetch.app/Contents/MacOS/autofetch
-          mv autofetch.app ../../dist/macos-arm64-gui/autofetch.app
-          cd ../../dist/macos-arm64-gui
-          ditto -c -k --sequesterRsrc --keepParent autofetch.app autofetch-macos-arm64-app.zip
-
-      - name: Verify binary metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          BINARY="dist/macos-arm64-gui/autofetch-gui"
-          VERSION="${GITHUB_REF_NAME#v}"
-          BUILD_COMMIT="${GITHUB_SHA::7}"
-          file "$BINARY" || true
-          go version -m "$BINARY"
-          VERSION_OUTPUT="$("$BINARY" --version)"
-          echo "$VERSION_OUTPUT"
-          echo "$VERSION_OUTPUT" | grep -Fx "autofetch ${VERSION}"
-          echo "$VERSION_OUTPUT" | grep -Fx "commit ${BUILD_COMMIT}"
-          echo "$VERSION_OUTPUT" | grep -Fx "darwin/arm64"
-          echo "$VERSION_OUTPUT" | grep -Fx "gui"
-          if echo "$VERSION_OUTPUT" | grep -Eq '(^| )(dev|unknown)($| )'; then exit 1; fi
-
-      - name: Generate SHA256
-        shell: bash
-        run: |
-          cd dist/macos-arm64-gui
-          shasum -a 256 autofetch-gui > autofetch-gui.sha256
-          shasum -a 256 autofetch-macos-arm64-app.zip > autofetch-macos-arm64-app.zip.sha256
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-macos-arm64
-          path: dist/macos-arm64-gui/
+          name: gui-${{ matrix.name }}-${{ matrix.language }}
+          path: dist/${{ matrix.name }}-gui-${{ matrix.language }}/
 
   release:
     name: create-release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - build-headless
-      - build-gui-linux
-      - build-gui-windows
-      - build-gui-macos-intel
-      - build-gui-macos-arm64
+      - build-gui
     runs-on: ubuntu-latest
 
     steps:
@@ -524,41 +285,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p release
+          for LANG in de en; do
+            cp "artifacts/gui-linux-amd64-${LANG}/autofetch-gui-${LANG}" "release/autofetch-gui-linux-amd64-${LANG}-${VERSION}"
+            cp "artifacts/gui-windows-amd64-${LANG}/autofetch-gui-${LANG}.exe" "release/autofetch-gui-windows-amd64-${LANG}-${VERSION}.exe"
+            cp "artifacts/gui-macos-intel-${LANG}/autofetch-macos-intel-${LANG}-app.zip" "release/autofetch-gui-macos-intel-${LANG}-${VERSION}.zip"
+            cp "artifacts/gui-macos-arm64-${LANG}/autofetch-macos-arm64-${LANG}-app.zip" "release/autofetch-gui-macos-arm64-${LANG}-${VERSION}.zip"
 
-          cp "artifacts/gui-linux-amd64/autofetch-gui" \
-             "release/autofetch-gui-linux-amd64-${VERSION}"
-          cp "artifacts/gui-windows-amd64/autofetch-gui.exe" \
-             "release/autofetch-gui-windows-amd64-${VERSION}.exe"
-          cp "artifacts/gui-macos-intel/autofetch-macos-intel-app.zip" \
-             "release/autofetch-gui-macos-intel-${VERSION}.zip"
-          cp "artifacts/gui-macos-arm64/autofetch-macos-arm64-app.zip" \
-             "release/autofetch-gui-macos-arm64-${VERSION}.zip"
-
-          cp "artifacts/headless-linux-amd64/autofetch" \
-             "release/autofetch-headless-linux-amd64-${VERSION}"
-          cp "artifacts/headless-linux-arm64/autofetch" \
-             "release/autofetch-headless-linux-arm64-${VERSION}"
-          cp "artifacts/headless-linux-armv7/autofetch" \
-             "release/autofetch-headless-linux-armv7-${VERSION}"
-          cp "artifacts/headless-windows-amd64/autofetch.exe" \
-             "release/autofetch-headless-windows-amd64-${VERSION}.exe"
-          cp "artifacts/headless-windows-386/autofetch.exe" \
-             "release/autofetch-headless-windows-386-${VERSION}.exe"
-          cp "artifacts/headless-macos-intel/autofetch" \
-             "release/autofetch-headless-macos-intel-${VERSION}"
-          cp "artifacts/headless-macos-arm64/autofetch" \
-             "release/autofetch-headless-macos-arm64-${VERSION}"
+            cp "artifacts/headless-linux-amd64-${LANG}/autofetch-${LANG}" "release/autofetch-headless-linux-amd64-${LANG}-${VERSION}"
+            cp "artifacts/headless-linux-arm64-${LANG}/autofetch-${LANG}" "release/autofetch-headless-linux-arm64-${LANG}-${VERSION}"
+            cp "artifacts/headless-linux-armv7-${LANG}/autofetch-${LANG}" "release/autofetch-headless-linux-armv7-${LANG}-${VERSION}"
+            cp "artifacts/headless-windows-amd64-${LANG}/autofetch-${LANG}.exe" "release/autofetch-headless-windows-amd64-${LANG}-${VERSION}.exe"
+            cp "artifacts/headless-windows-386-${LANG}/autofetch-${LANG}.exe" "release/autofetch-headless-windows-386-${LANG}-${VERSION}.exe"
+            cp "artifacts/headless-macos-intel-${LANG}/autofetch-${LANG}" "release/autofetch-headless-macos-intel-${LANG}-${VERSION}"
+            cp "artifacts/headless-macos-arm64-${LANG}/autofetch-${LANG}" "release/autofetch-headless-macos-arm64-${LANG}-${VERSION}"
+          done
 
           git archive --format=zip --output "release/autofetch-client-source-${VERSION}.zip" HEAD
-
           cd release
-          for f in *; do
-            [ -f "$f" ] || continue
-            sha256sum "$f" > "$f.sha256"
-          done
+          for f in *; do [ -f "$f" ] || continue; sha256sum "$f" > "$f.sha256"; done
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

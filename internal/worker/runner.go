@@ -525,10 +525,10 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				// If we canceled due to server-side loss/cancel, completion/state cleanup is already handled in the heartbeat branch.
 				if errors.Is(dlErr, context.Canceled) {
 					mode := localStopMode(ctx)
-					statusText := "abgebrochen"
+					statusText := observe.StatusDownloadCanceled
 					errorText := "client_shutdown"
 					if mode == "pause" {
-						statusText = "pausiert"
+						statusText = observe.StatusDownloadPaused
 						errorText = "client_paused"
 					}
 					obs.DownloadFinished(displayPath, statusText)
@@ -703,7 +703,7 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 			}
 
 			log.Printf("download finished: %s", displayPath)
-			obs.DownloadFinished(displayPath, "fertig")
+			obs.DownloadFinished(displayPath, observe.StatusDownloadCompleted)
 			obs.JobCleared()
 
 			data := map[string]any{
@@ -819,7 +819,7 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 
 			if code == 409 && apiErr != nil && (apiErr.Error == "job_canceled" || apiErr.CanceledAt != nil) {
 				// Stop download immediately
-				serverStopStatus = "abgebrochen"
+				serverStopStatus = observe.StatusDownloadCanceled
 				serverStopErr = context.Canceled
 				cancel()
 
@@ -850,7 +850,7 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 
 			// Other server-side "stop working" signals
 			if code == 404 && apiErr != nil && apiErr.Error == "attempt_not_found" {
-				serverStopStatus = "abgebrochen"
+				serverStopStatus = observe.StatusDownloadCanceled
 				serverStopErr = errors.New("attempt_not_found")
 				cancel()
 				log.Printf("heartbeat 404 attempt_not_found, giving up job=%s attempt=%s", job.JobID, job.Lease.AttemptID)
@@ -859,7 +859,7 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				return serverStopErr
 			}
 			if code == 409 && apiErr != nil && apiErr.Error == "attempt_not_open" {
-				serverStopStatus = "abgebrochen"
+				serverStopStatus = observe.StatusDownloadCanceled
 				serverStopErr = errors.New("attempt_not_open")
 				cancel()
 				log.Printf("heartbeat 409 attempt_not_open, giving up job=%s attempt=%s", job.JobID, job.Lease.AttemptID)

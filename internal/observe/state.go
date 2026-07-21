@@ -7,6 +7,18 @@ import (
 	"time"
 )
 
+const (
+	StatusPairingWaiting         = "pairing_waiting"
+	StatusPairingApproved        = "pairing_approved"
+	StatusPairingExpiredNewCode  = "pairing_expired_new_code"
+	StatusPairingRejectedNewCode = "pairing_rejected_new_code"
+	StatusPairingFailed          = "pairing_failed"
+	StatusDownloadRunning        = "download_running"
+	StatusDownloadCompleted      = "download_completed"
+	StatusDownloadPaused         = "download_paused"
+	StatusDownloadCanceled       = "download_canceled"
+)
+
 type DownloadSnapshot struct {
 	Target     string  `json:"target"`
 	Downloaded int64   `json:"downloaded"`
@@ -129,7 +141,7 @@ func (s *State) StartPairing(code, pairingURL string, expiry time.Time) {
 	s.currentJob = ""
 	s.activeDownload = nil
 	s.pairingActive = true
-	s.pairingStatus = "Warte auf Bestätigung"
+	s.pairingStatus = StatusPairingWaiting
 	s.pairingCode = strings.TrimSpace(code)
 	s.pairingURL = strings.TrimSpace(pairingURL)
 	s.pairingExpiry = expiry
@@ -140,7 +152,7 @@ func (s *State) PairingPending(status string) {
 	defer s.mu.Unlock()
 	s.pairingActive = true
 	if strings.TrimSpace(status) == "" {
-		status = "Warte auf Bestätigung"
+		status = StatusPairingWaiting
 	}
 	s.pairingStatus = status
 }
@@ -151,7 +163,7 @@ func (s *State) PairingApproved(clientID string) {
 	s.paired = true
 	s.clientID = strings.TrimSpace(clientID)
 	s.pairingActive = false
-	s.pairingStatus = "Gekoppelt"
+	s.pairingStatus = StatusPairingApproved
 	s.pairingCode = ""
 	s.pairingExpiry = time.Time{}
 }
@@ -162,10 +174,10 @@ func (s *State) PairingFailed(err error) {
 	s.pairingActive = false
 	s.paired = false
 	if err != nil {
-		s.pairingStatus = err.Error()
+		s.pairingStatus = StatusPairingFailed
 		s.lastError = err.Error()
 	} else {
-		s.pairingStatus = "Pairing fehlgeschlagen"
+		s.pairingStatus = StatusPairingFailed
 	}
 }
 
@@ -198,7 +210,7 @@ func (s *State) DownloadStarted(target string) {
 	target = strings.TrimSpace(target)
 	if target != "" {
 		s.lastDownload = target
-		s.lastDownloadStatus = "läuft"
+		s.lastDownloadStatus = StatusDownloadRunning
 		s.activeDownload = &DownloadSnapshot{Target: target}
 	}
 }
@@ -231,7 +243,7 @@ func (s *State) DownloadFinished(target, status string) {
 	}
 	status = strings.TrimSpace(status)
 	if status == "" {
-		status = "fertig"
+		status = StatusDownloadCompleted
 	}
 	s.lastDownloadStatus = status
 	s.activeDownload = nil

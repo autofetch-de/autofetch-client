@@ -12,21 +12,22 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/localization"
 	"github.com/autofetch-de/autofetch-client/internal/webui"
 	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
 
 func Run(cfg config.Config, info buildinfo.Info) error {
+	l := localization.New(info.Language)
 	service, _, err := Bootstrap(&cfg, info)
 	if err != nil {
-		log.Print(err)
-		return nil
+		return fmt.Errorf("bootstrap failed: %w", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if cfg.EnableWebUI && !cfg.Headless {
-		ui := webui.New(cfg.WebUIListenAddr, service.state, service)
+		ui := webui.New(cfg.WebUIListenAddr, service.state, service, l)
 		if err := ui.Start(); err != nil {
 			return fmt.Errorf("local ui start failed: %w", err)
 		}
@@ -48,7 +49,7 @@ func Run(cfg config.Config, info buildinfo.Info) error {
 	}
 
 	if cfg.ClientID == "" || cfg.ClientToken == "" {
-		if err := runPairingFlow(&cfg, info); err != nil {
+		if err := runPairingFlow(&cfg, info, l); err != nil {
 			return fmt.Errorf("pairing failed: %w", err)
 		}
 		service.api.ClientID = cfg.ClientID

@@ -11,6 +11,7 @@ var (
 	BuildCommit = "unknown"
 	BuildDate   = "unknown"
 	Variant     = "unknown"
+	Language    = "de"
 	Platform    = ""
 	Arch        = ""
 )
@@ -20,6 +21,7 @@ type Info struct {
 	Platform    string `json:"platform,omitempty"`
 	Arch        string `json:"arch,omitempty"`
 	Variant     string `json:"variant,omitempty"`
+	Language    string `json:"language,omitempty"`
 	BuildCommit string `json:"build_commit,omitempty"`
 	BuildDate   string `json:"build_date,omitempty"`
 }
@@ -35,8 +37,19 @@ func Current() Info {
 	}
 	return Info{
 		Version: clean(Version, "dev"), Platform: platform, Arch: arch,
-		Variant: clean(Variant, "unknown"), BuildCommit: clean(BuildCommit, "unknown"),
+		Variant: clean(Variant, "unknown"), Language: normalizeLanguage(Language), BuildCommit: clean(BuildCommit, "unknown"),
 		BuildDate: clean(BuildDate, "unknown"),
+	}
+}
+
+func normalizeLanguage(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "de":
+		return "de"
+	case "en":
+		return "en"
+	default:
+		return "en"
 	}
 }
 
@@ -55,8 +68,8 @@ func clean(v, fallback string) string {
 }
 
 func (i Info) VersionText() string {
-	return fmt.Sprintf("autofetch %s\ncommit %s\nbuilt %s\n%s/%s\n%s", i.Version, i.BuildCommit, i.BuildDate, i.Platform, i.Arch, i.Variant)
+	return fmt.Sprintf("autofetch %s\ncommit %s\nbuilt %s\n%s/%s\n%s\nlanguage %s", i.Version, i.BuildCommit, i.BuildDate, i.Platform, i.Arch, i.Variant, normalizeLanguage(i.Language))
 }
 func (i Info) StartLogLines() []string {
-	return []string{"autofetch client starting", "version=" + i.Version, "commit=" + i.BuildCommit, "build_date=" + i.BuildDate, "platform=" + i.Platform, "arch=" + i.Arch, "variant=" + i.Variant}
+	return []string{"autofetch client starting", "version=" + i.Version, "commit=" + i.BuildCommit, "build_date=" + i.BuildDate, "platform=" + i.Platform, "arch=" + i.Arch, "variant=" + i.Variant, "language=" + i.Language}
 }

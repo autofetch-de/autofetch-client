@@ -1,81 +1,105 @@
 # autofetch client
 
-Headless download client for the autofetch system.
+The autofetch client runs downloads on your own device. It pairs with an autofetch account, receives download jobs, stores files in a local download folder and reports the technical result to the server.
 
-The client connects to the autofetch service, retrieves download jobs, processes them locally, and reports results back to the server.
+The repository provides a graphical client with a system tray, a local browser interface and a headless command-line build.
 
-No manual server configuration is required.
+[Deutsche Dokumentation](README.de.md)
 
----
+## Language builds
 
-## Features
+Every release contains two fixed-language variants built from the same source code and translation catalogs:
 
-* Headless operation (no UI)
-* Secure client authentication via pairing and token
-* Reliable job leasing with heartbeat mechanism
-* Idempotent downloads (deduplication)
-* Cross-platform support (Linux, macOS, Windows, ARM)
-* Suitable for servers, NAS systems, and low-power devices
+- `de`: German user interface
+- `en`: English user interface
 
----
+Choose the language suffix when downloading a release, for example:
 
-## Installation
+```text
+autofetch-gui-windows-amd64-en-v1.1.0.exe
+autofetch-headless-linux-arm64-de-v1.1.0
+```
 
-1. Download the appropriate binary for your platform.
-2. Extract the archive (if applicable).
-3. Place the `autofetch` binary in a suitable location.
+The language does not affect API paths, configuration keys, technical error codes or log terminology. Technical logs remain in English so support information stays consistent across both builds.
 
-No additional dependencies are required.
+## Available variants
 
----
+### Graphical client
 
-## First Start & Pairing
+The graphical build includes:
 
-On first start, the client is not yet connected to a server.
+- desktop status window
+- system tray menu
+- pairing flow
+- download progress
+- general settings
+- local IRC, NickServ, SASL and Reverse DCC settings
+
+Graphical release targets currently cover:
+
+- Windows AMD64
+- macOS Intel
+- macOS Apple Silicon
+- Linux AMD64
+
+### Headless client
+
+The headless build is intended for servers, NAS systems and low-power devices. Release targets currently cover:
+
+- Linux AMD64
+- Linux ARM64
+- Linux ARMv7
+- Windows AMD64
+- Windows 386
+- macOS Intel
+- macOS Apple Silicon
+
+The normal command-line client can also expose a status interface on `127.0.0.1:23324`. Use `--headless` to disable the local interface.
+
+## First start and pairing
+
+Run the downloaded binary. The filename depends on the selected language and platform:
 
 ```bash
-./autofetch
+./autofetch-en
 ```
 
-The client will print a pairing code.
+On first start, the client displays a pairing code and the autofetch pairing page. Enter the code in the portal and approve the client. The client then stores its credentials locally and starts processing jobs.
 
-Enter this code in the autofetch web interface under **Clients**.
-Once approved, the client stores its credentials locally and starts processing jobs automatically.
-
-### Re-pairing
-
-To reset the connection and start a new pairing process:
+To discard the stored client credentials and start pairing again:
 
 ```bash
-./autofetch --re-pair
+./autofetch-en --re-pair
 ```
 
----
-
-## Running as a Service
-
-### Linux (systemd)
-
-Create user and directories:
+To print only the pairing code:
 
 ```bash
-sudo useradd -r -s /usr/sbin/nologin autofetch
-sudo mkdir -p /var/lib/autofetch
-sudo chown autofetch:autofetch /var/lib/autofetch
+./autofetch-en --print-code-only
 ```
 
-Install binary:
+## Local configuration
+
+The client stores its configuration below the operating system's user configuration directory:
+
+```text
+autofetch/client.json
+autofetch/irc-secrets.json
+```
+
+`client.json` contains the server connection, client credentials, download folder and non-secret IRC settings. IRC passwords and SASL credentials are stored separately in `irc-secrets.json`. Both files are written with restrictive permissions where the operating system supports them.
+
+The build language is not stored in the configuration. It is compiled into the selected `de` or `en` release artifact.
+
+## Linux systemd example
+
+Install the selected headless binary under a stable local filename:
 
 ```bash
-sudo cp autofetch /usr/local/bin/autofetch
-sudo chmod +x /usr/local/bin/autofetch
+sudo install -m 0755 autofetch-headless-linux-amd64-en-v1.1.0 /usr/local/bin/autofetch
 ```
 
-Create service file:
-
-```
-/etc/systemd/system/autofetch.service
-```
+Create `/etc/systemd/system/autofetch.service`:
 
 ```ini
 [Unit]
@@ -86,7 +110,7 @@ Wants=network-online.target
 [Service]
 User=autofetch
 Group=autofetch
-ExecStart=/usr/local/bin/autofetch
+ExecStart=/usr/local/bin/autofetch --headless
 WorkingDirectory=/var/lib/autofetch
 Restart=always
 RestartSec=5
@@ -95,93 +119,45 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+Then enable the service:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable autofetch
-sudo systemctl start autofetch
-```
-
-Logs:
-
-```bash
+sudo systemctl enable --now autofetch
 journalctl -u autofetch -f
 ```
 
----
+## Privacy and external communication
 
-### macOS (launchd)
+The client contains no analytics, advertising, tracking or marketing telemetry. It communicates with the configured autofetch server only as required for pairing, configuration, job leasing, heartbeats and result reporting.
 
-Install binary:
+When Reverse DCC is enabled, the client may contact public IP detection services to determine the address announced to an IRC bot. Set `AUTOFETCH_DCC_PUBLIC_IP` to provide the public IP explicitly. Technical logs may contain hostnames, channels, filenames and network errors; review logs before sharing them with support.
 
-```bash
-sudo cp autofetch /usr/local/bin/autofetch
-sudo chmod +x /usr/local/bin/autofetch
-```
+## Build metadata
 
-Create LaunchAgent:
-
-```
-~/Library/LaunchAgents/com.autofetch.client.plist
-```
-
-Load service:
+Both GUI and headless binaries support:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.autofetch.client.plist
+./autofetch-en --version
 ```
 
----
+The output includes the version, commit, build date, platform, architecture, variant and fixed language.
 
-### Windows
+## Development checks
 
-1. Place `autofetch.exe` in e.g.:
+Run the non-GUI test suite with:
 
-   ```
-   C:\Program Files\autofetch\
-   ```
-
-2. First run (pairing):
-
-```powershell
-cd "C:\Program Files\autofetch"
-.\autofetch.exe
+```bash
+go test ./internal/localization ./internal/observe ./internal/buildinfo ./internal/api ./internal/config ./internal/app ./internal/webui ./internal/worker ./internal/download
 ```
 
-3. Run as a service (recommended):
+A full release build additionally requires the platform-specific Fyne dependencies used by the graphical client.
 
-Using NSSM:
+Architecture and manual verification:
 
-```powershell
-nssm install autofetch "C:\Program Files\autofetch\autofetch.exe"
-nssm start autofetch
-```
-
----
-
-## Security Model
-
-* Clients authenticate using a server-issued token
-* All API communication is authenticated
-* Tokens can be revoked at any time
-* Jobs are only assigned after successful pairing
-
----
-
-## Project Structure
-
-This repository contains **only the client**.
-
-* The client is open source
-* The autofetch server is **not part of this repository** and remains proprietary
-
----
+- [`docs/I18N_ARCHITECTURE.md`](docs/I18N_ARCHITECTURE.md)
+- [`docs/I18N_MANUAL_TEST.md`](docs/I18N_MANUAL_TEST.md)
 
 ## License
 
-This project is licensed under the MIT License.
-
-You are free to use, modify, and distribute the client software.
-
-See the `LICENSE` file for details.
+The autofetch client is licensed under the MIT License. See `LICENSE` for details.

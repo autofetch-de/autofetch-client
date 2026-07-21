@@ -1641,7 +1641,7 @@ func wrapReverseDCCAcceptError(err error, advertisedIP string, port int) error {
 }
 
 func ReverseDCCHelpMessage(advertisedIP string, port int) string {
-	return fmt.Sprintf("Der Bot hat einen Reverse-DCC-Download angeboten, konnte diesen Client aber auf TCP-Port %d nicht erreichen. Für diesen Channel oder Bot muss dein Router eingehende TCP-Verbindungen im konfigurierten DCC-Portbereich an dieses Gerät weiterleiten. Prüfe die Portfreigabe in deinem Router und die lokale Firewall.", port)
+	return fmt.Sprintf("reverse_dcc_port_forward_required: port=%d advertised_ip=%s", port, strings.TrimSpace(advertisedIP))
 }
 
 func reverseDCCTimeoutError(advertisedIP string, port int) error {
@@ -1649,7 +1649,7 @@ func reverseDCCTimeoutError(advertisedIP string, port int) error {
 }
 
 func ReverseDCCDisabledMessage() string {
-	return "Der Bot hat einen Reverse-DCC-Download angeboten, aber Reverse-DCC ist im Client deaktiviert. Aktiviere Reverse-DCC in den IRC-Einstellungen und richte im Router eine Portfreigabe für den dort eingestellten TCP-Portbereich auf dieses Gerät ein."
+	return "reverse_dcc_disabled"
 }
 
 func reverseDCCDisabledError() error {

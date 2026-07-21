@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add shared German and English translation catalogs for GUI, system tray, local Web UI and headless pairing output.
+- Build separate `de` and `en` release artifacts from the same source tree.
+- Include the fixed build language in startup and `--version` metadata.
+- Add catalog parity, fallback and user-error localization tests.
+- Add German client documentation alongside the English README.
+
+### Changed
+
+- Replace localized runtime status strings with stable language-neutral status codes.
+- Keep technical logs and server-facing error codes in English while localizing user-facing explanations.
+- Replace German Reverse DCC errors in the download layer with stable technical codes and structured parameters.
+- Update GitHub Actions and local build scripts to produce both language variants.
+
 ## 1.0.2 - 2026-07-14
 
 ### Fixed

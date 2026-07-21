@@ -9,6 +9,7 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
+	"github.com/autofetch-de/autofetch-client/internal/localization"
 
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
@@ -27,6 +28,7 @@ import (
 )
 
 func Run(ctx context.Context, svc *app.Service) error {
+	l := svc.Localizer()
 	a := fyneapp.NewWithID("de.autofetch.client")
 	a.SetIcon(assets.AppIconPNG)
 	w := a.NewWindow("autofetch-client")
@@ -41,29 +43,29 @@ func Run(ctx context.Context, svc *app.Service) error {
 			return
 		}
 		w.Hide()
-		view.setActionText("Fenster wurde in den Tray minimiert.")
+		view.setActionText(l.T("notice.window_minimized"))
 	})
 
 	if desk, ok := a.(desktopdriver.App); ok {
-		openItem := fyne.NewMenuItem("Fenster öffnen", func() {
+		openItem := fyne.NewMenuItem(l.T("tray.open_window"), func() {
 			w.Show()
 			w.RequestFocus()
 		})
-		startItem := fyne.NewMenuItem("Start", func() {
+		startItem := fyne.NewMenuItem(l.T("action.start"), func() {
 			view.startOrResume(svc)
 		})
-		pauseItem := fyne.NewMenuItem("Pause", func() {
+		pauseItem := fyne.NewMenuItem(l.T("action.pause"), func() {
 			view.stopOrPause(svc)
 		})
-		settingsItem := fyne.NewMenuItem("Einstellungen", func() {
+		settingsItem := fyne.NewMenuItem(l.T("action.settings"), func() {
 			view.openSettingsDialog(w, svc)
 		})
-		repairPairingItem := fyne.NewMenuItem("Neu koppeln", func() {
+		repairPairingItem := fyne.NewMenuItem(l.T("action.repair"), func() {
 			view.confirmRePair(w, svc)
 		})
 		versionItem := fyne.NewMenuItem("Version "+svc.BuildInfo().Version, func() {})
 		versionItem.Disabled = true
-		quitItem := fyne.NewMenuItem("Beenden", func() {
+		quitItem := fyne.NewMenuItem(l.T("action.quit"), func() {
 			quitting = true
 			_ = svc.Stop()
 			w.Close()
@@ -87,7 +89,7 @@ func Run(ctx context.Context, svc *app.Service) error {
 	}
 
 	if err := svc.Start(); err != nil {
-		view.setActionText(err.Error())
+		view.setActionText(l.UserError(err.Error()))
 	}
 
 	go func() {
@@ -148,25 +150,26 @@ type mainView struct {
 	overrideStatus string
 	lastState      uiState
 	lastLogsKey    string
+	l              *localization.Localizer
 }
 
 func newMainView(w fyne.Window, svc *app.Service) *mainView {
-	v := &mainView{lastState: uiState(-1)}
+	v := &mainView{lastState: uiState(-1), l: svc.Localizer()}
 	v.titleLabel = widget.NewLabelWithStyle("autofetch-client", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	v.statusBar = widget.NewLabel("")
 	v.statusBar.Wrapping = fyne.TextTruncate
 	v.contentHolder = container.NewMax()
 
-	v.primaryAction = widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(), func() {
+	v.primaryAction = widget.NewButtonWithIcon(v.l.T("action.start"), theme.MediaPlayIcon(), func() {
 		v.startOrResume(svc)
 	})
-	v.secondaryAction = widget.NewButtonWithIcon("Pause", theme.MediaPauseIcon(), func() {
+	v.secondaryAction = widget.NewButtonWithIcon(v.l.T("action.pause"), theme.MediaPauseIcon(), func() {
 		v.stopOrPause(svc)
 	})
-	v.settingsAction = widget.NewButtonWithIcon("Einstellungen", theme.SettingsIcon(), func() {
+	v.settingsAction = widget.NewButtonWithIcon(v.l.T("action.settings"), theme.SettingsIcon(), func() {
 		v.openSettingsDialog(w, svc)
 	})
-	v.repairPairingAction = widget.NewButtonWithIcon("Neu koppeln", theme.ViewRefreshIcon(), func() {
+	v.repairPairingAction = widget.NewButtonWithIcon(v.l.T("action.repair"), theme.ViewRefreshIcon(), func() {
 		v.confirmRePair(w, svc)
 	})
 	for _, btn := range []*widget.Button{v.primaryAction, v.secondaryAction, v.settingsAction, v.repairPairingAction} {
@@ -178,43 +181,43 @@ func newMainView(w fyne.Window, svc *app.Service) *mainView {
 	v.pairExpiry = widget.NewLabel("—")
 	v.pairExpiry.Alignment = fyne.TextAlignCenter
 	v.pairExpiry.Wrapping = fyne.TextWrapWord
-	v.idleMessage = widget.NewLabelWithStyle("Nichts zu tun - warte auf Aufträge.", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	v.idleMessage = widget.NewLabelWithStyle(v.l.T("idle.message"), fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	v.idleMessage.Wrapping = fyne.TextWrapWord
 
-	copyBtn := widget.NewButtonWithIcon("Code kopieren", theme.ContentCopyIcon(), func() {
+	copyBtn := widget.NewButtonWithIcon(v.l.T("action.copy_code"), theme.ContentCopyIcon(), func() {
 		snap := svc.Snapshot()
 		code := strings.TrimSpace(snap.PairingCode)
 		if code == "" {
-			v.setActionText("Aktuell ist kein Kopplungscode verfügbar.")
+			v.setActionText(v.l.T("notice.no_pairing_code"))
 			return
 		}
 		w.Clipboard().SetContent(code)
-		v.setActionText("Pairing-Code kopiert.")
+		v.setActionText(v.l.T("notice.pairing_code_copied"))
 	})
-	openBtn := widget.NewButtonWithIcon("Pairing-Seite öffnen", theme.ComputerIcon(), func() {
+	openBtn := widget.NewButtonWithIcon(v.l.T("action.open_pairing_page"), theme.ComputerIcon(), func() {
 		snap := svc.Snapshot()
 		target := buildPairingURL(snap.PairingURL, snap.PairingCode)
 		if err := fyne.CurrentApp().OpenURL(mustURL(target)); err != nil {
-			v.setActionText(err.Error())
+			v.setActionText(v.l.UserError(err.Error()))
 			return
 		}
-		v.setActionText("Pairing-Seite geöffnet.")
+		v.setActionText(v.l.T("notice.pairing_page_opened"))
 	})
 	pairButtons := container.NewGridWithColumns(2, copyBtn, openBtn)
 	pairContent := container.NewVBox(
-		widget.NewLabel("Diesen Code auf der Pairing-Seite eingeben:"),
+		widget.NewLabel(v.l.T("pairing.enter_code")),
 		container.NewPadded(container.NewCenter(container.NewHBox(v.pairCode))),
 		v.pairExpiry,
 		pairButtons,
 	)
-	v.pairingCard = widget.NewCard("Client koppeln", "", pairContent)
+	v.pairingCard = widget.NewCard(v.l.T("pairing.card_title"), "", pairContent)
 
 	v.logEntry = widget.NewMultiLineEntry()
 	v.logEntry.Wrapping = fyne.TextWrapWord
 	v.logEntry.SetMinRowsVisible(12)
 	logScroll := container.NewVScroll(v.logEntry)
 	logBg := canvas.NewRectangle(theme.InputBackgroundColor())
-	v.logAccordion = widget.NewAccordion(widget.NewAccordionItem("Log anzeigen", container.NewStack(logBg, container.NewPadded(logScroll))))
+	v.logAccordion = widget.NewAccordion(widget.NewAccordionItem(v.l.T("log.show"), container.NewStack(logBg, container.NewPadded(logScroll))))
 
 	v.progressBar = widget.NewProgressBar()
 	v.progressBar.Min = 0
@@ -274,7 +277,7 @@ func (v *mainView) refresh(svc *app.Service) {
 		v.refreshTray(snap)
 		return
 	}
-	v.statusBar.SetText(buildStatusLine(snap))
+	v.statusBar.SetText(buildStatusLine(v.l, snap))
 	v.refreshTray(snap)
 }
 
@@ -326,9 +329,9 @@ func (v *mainView) refreshActions(snap observe.Snapshot) {
 		v.primaryAction.Disable()
 		v.secondaryAction.Disable()
 		v.repairPairingAction.Disable()
-		v.primaryAction.SetText("Start")
+		v.primaryAction.SetText(v.l.T("action.start"))
 		v.primaryAction.SetIcon(theme.MediaPlayIcon())
-		v.secondaryAction.SetText("Pause")
+		v.secondaryAction.SetText(v.l.T("action.pause"))
 		v.secondaryAction.SetIcon(theme.MediaPauseIcon())
 		return
 	}
@@ -336,28 +339,28 @@ func (v *mainView) refreshActions(snap observe.Snapshot) {
 	switch {
 	case snap.ActiveDownload != nil:
 		v.primaryAction.Disable()
-		v.primaryAction.SetText("Start")
+		v.primaryAction.SetText(v.l.T("action.start"))
 		v.primaryAction.SetIcon(theme.MediaPlayIcon())
 		v.secondaryAction.Enable()
-		v.secondaryAction.SetText("Pause")
+		v.secondaryAction.SetText(v.l.T("action.pause"))
 		v.secondaryAction.SetIcon(theme.MediaPauseIcon())
 	case snap.Running:
 		v.primaryAction.Disable()
-		v.primaryAction.SetText("Start")
+		v.primaryAction.SetText(v.l.T("action.start"))
 		v.primaryAction.SetIcon(theme.MediaPlayIcon())
 		v.secondaryAction.Enable()
-		v.secondaryAction.SetText("Pause")
+		v.secondaryAction.SetText(v.l.T("action.pause"))
 		v.secondaryAction.SetIcon(theme.MediaPauseIcon())
 	default:
-		label := "Start"
+		label := v.l.T("action.start")
 		if strings.TrimSpace(snap.LastError) != "" {
-			label = "Resume"
+			label = v.l.T("action.resume")
 		}
 		v.primaryAction.Enable()
 		v.primaryAction.SetText(label)
 		v.primaryAction.SetIcon(theme.MediaPlayIcon())
 		v.secondaryAction.Disable()
-		v.secondaryAction.SetText("Pause")
+		v.secondaryAction.SetText(v.l.T("action.pause"))
 		v.secondaryAction.SetIcon(theme.MediaPauseIcon())
 	}
 }
@@ -391,15 +394,15 @@ func (v *mainView) refreshPairingView(snap observe.Snapshot) {
 	}
 	v.pairCode.ParseMarkdown("**`" + pairCode + "`**")
 
-	expires := formatTimestamp(snap.PairingExpiry)
-	remaining := formatRemainingTimestamp(snap.PairingExpiry)
+	expires := v.l.FormatTimestamp(snap.PairingExpiry)
+	remaining := v.l.FormatRemaining(snap.PairingExpiry)
 	switch {
 	case expires != "" && remaining != "":
-		v.pairExpiry.SetText(fmt.Sprintf("Gültig bis %s (%s)", expires, remaining))
+		v.pairExpiry.SetText(v.l.T("pairing.valid_until", map[string]any{"Expires": expires, "Remaining": remaining}))
 	case expires != "":
-		v.pairExpiry.SetText("Gültig bis " + expires)
+		v.pairExpiry.SetText(v.l.T("pairing.valid_until_no_remaining", map[string]any{"Expires": expires}))
 	default:
-		v.pairExpiry.SetText("Gültigkeit wird ermittelt …")
+		v.pairExpiry.SetText(v.l.T("pairing.validity_checking"))
 	}
 }
 
@@ -452,19 +455,19 @@ func (v *mainView) refreshDownloadView(snap observe.Snapshot) {
 
 func (v *mainView) startOrResume(svc *app.Service) {
 	if err := svc.Start(); err != nil {
-		v.setActionText(err.Error())
+		v.setActionText(v.l.UserError(err.Error()))
 		return
 	}
-	v.setActionText("Client wurde gestartet.")
+	v.setActionText(v.l.T("notice.client_started"))
 	v.refresh(svc)
 }
 
 func (v *mainView) stopOrPause(svc *app.Service) {
 	if err := svc.Stop(); err != nil {
-		v.setActionText(err.Error())
+		v.setActionText(v.l.UserError(err.Error()))
 		return
 	}
-	v.setActionText("Client wurde pausiert.")
+	v.setActionText(v.l.T("notice.client_paused"))
 	v.refresh(svc)
 }
 
@@ -507,7 +510,7 @@ func preserveExistingIRCSecrets(next, existing []config.IRCNetwork) []config.IRC
 	return next
 }
 
-func buildIRCSecretStatus(networks []config.IRCNetwork) string {
+func buildIRCSecretStatus(l *localization.Localizer, networks []config.IRCNetwork) string {
 	lines := make([]string, 0, len(networks))
 	for _, n := range networks {
 		host := strings.TrimSpace(n.Host)
@@ -519,10 +522,10 @@ func buildIRCSecretStatus(networks []config.IRCNetwork) string {
 		}
 		status := make([]string, 0, 2)
 		if strings.TrimSpace(n.NickServ.Password) != "" {
-			status = append(status, "NickServ-Passwort gespeichert")
+			status = append(status, l.T("irc.nickserv_saved"))
 		}
 		if strings.TrimSpace(n.SASL.Username) != "" || strings.TrimSpace(n.SASL.Password) != "" {
-			status = append(status, "SASL-Zugang gespeichert")
+			status = append(status, l.T("irc.sasl_saved"))
 		}
 		if len(status) == 0 {
 			continue
@@ -530,35 +533,35 @@ func buildIRCSecretStatus(networks []config.IRCNetwork) string {
 		lines = append(lines, fmt.Sprintf("%s: %s", host, strings.Join(status, ", ")))
 	}
 	if len(lines) == 0 {
-		return "Keine lokalen IRC-Zugangsdaten gespeichert. Passwortfelder bleiben im JSON-Editor absichtlich leer; leere Felder ändern bestehende Secrets nicht."
+		return l.T("irc.no_credentials")
 	}
-	return "Lokal gespeicherte IRC-Zugangsdaten\n- " + strings.Join(lines, "\n- ") + "\n\nPasswortfelder bleiben im JSON-Editor absichtlich leer; leere Felder ändern bestehende Secrets nicht."
+	return l.T("irc.saved_credentials", map[string]any{"Lines": strings.Join(lines, "\n- ")})
 }
 
 func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 	snap := svc.Snapshot()
 	downloadDir := widget.NewEntry()
 	downloadDir.SetText(strings.TrimSpace(svc.DownloadDir()))
-	downloadDir.SetPlaceHolder("Download-Basisordner")
+	downloadDir.SetPlaceHolder(v.l.T("settings.download_folder_placeholder"))
 
 	clientName := widget.NewLabel(orDash(snap.ClientName))
 	clientName.Wrapping = fyne.TextWrapWord
 	serverURL := widget.NewLabel("https://autofetch.de")
-	pairingStatus := widget.NewLabel(settingsPairingStatus(snap))
+	pairingStatus := widget.NewLabel(settingsPairingStatus(v.l, snap))
 	pairingStatus.Wrapping = fyne.TextWrapWord
-	hint := widget.NewLabel("Änderungen am Download-Ordner und an der IRC-Identität werden lokal gespeichert und bei laufendem Client direkt übernommen.")
+	hint := widget.NewLabel(v.l.T("settings.local_changes_hint"))
 	hint.Wrapping = fyne.TextWrapWord
 	//ircCfg := svc.IRCConfig()
-	ircSettingsButton := widget.NewButtonWithIcon("IRC-Einstellungen öffnen", theme.SettingsIcon(), func() {
+	ircSettingsButton := widget.NewButtonWithIcon(v.l.T("action.open_irc_settings"), theme.SettingsIcon(), func() {
 		v.openIRCSettingsDialog(w, svc)
 	})
-	ircSettingsHint := widget.NewLabel("IRC-Networks, NickServ und SASL werden in einem eigenen Dialog bearbeitet.")
+	ircSettingsHint := widget.NewLabel(v.l.T("settings.irc_hint"))
 	ircSettingsHint.Wrapping = fyne.TextWrapWord
 
-	chooseButton := widget.NewButtonWithIcon("Ordner wählen", theme.FolderOpenIcon(), func() {
+	chooseButton := widget.NewButtonWithIcon(v.l.T("action.choose_folder"), theme.FolderOpenIcon(), func() {
 		dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
 			if err != nil {
-				v.setActionText(err.Error())
+				v.setActionText(v.l.UserError(err.Error()))
 				return
 			}
 			if uri == nil {
@@ -569,14 +572,14 @@ func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 	})
 
 	form := widget.NewForm(
-		widget.NewFormItem("Client-Name", clientName),
-		widget.NewFormItem("Server", serverURL),
-		widget.NewFormItem("Status", pairingStatus),
-		widget.NewFormItem("Download-Ordner", container.NewVBox(downloadDir, chooseButton, hint)),
+		widget.NewFormItem(v.l.T("settings.client_name"), clientName),
+		widget.NewFormItem(v.l.T("settings.server"), serverURL),
+		widget.NewFormItem(v.l.T("settings.status"), pairingStatus),
+		widget.NewFormItem(v.l.T("settings.download_folder"), container.NewVBox(downloadDir, chooseButton, hint)),
 		widget.NewFormItem("IRC", container.NewVBox(ircSettingsButton, ircSettingsHint)),
 	)
 
-	dlg := dialog.NewCustomConfirm("Einstellungen", "Speichern", "Abbrechen", container.NewPadded(form), func(ok bool) {
+	dlg := dialog.NewCustomConfirm(v.l.T("settings.title"), v.l.T("action.save"), v.l.T("action.cancel"), container.NewPadded(form), func(ok bool) {
 		if !ok {
 			return
 		}
@@ -585,10 +588,10 @@ func (v *mainView) openSettingsDialog(w fyne.Window, svc *app.Service) {
 			err := svc.UpdateLocalSettings(downloadDir.Text, updatedIRC, updatedIRC.AutoRegister, updatedIRC.RegistrationEmail)
 			fyne.Do(func() {
 				if err != nil {
-					v.setActionText(err.Error())
+					v.setActionText(v.l.UserError(err.Error()))
 					return
 				}
-				v.setActionText("Einstellungen gespeichert.")
+				v.setActionText(v.l.T("notice.settings_saved"))
 				v.refresh(svc)
 			})
 		}()
@@ -619,13 +622,13 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 			host = strings.TrimSpace(n.Name)
 		}
 		if host == "" {
-			host = fmt.Sprintf("Network %d", idx+1)
+			host = fmt.Sprintf("%s %d", v.l.T("irc.network"), idx+1)
 		}
 		return host
 	}
 	channelSummary := func(n config.IRCNetwork) string {
 		if len(n.Channels) == 0 {
-			return "ohne Channels"
+			return v.l.T("irc.no_channels")
 		}
 		if len(n.Channels) == 1 {
 			return n.Channels[0]
@@ -636,51 +639,51 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 	hostEntry := widget.NewEntry()
 	nameEntry := widget.NewEntry()
 	portEntry := widget.NewEntry()
-	tlsCheck := widget.NewCheck("TLS verwenden", nil)
+	tlsCheck := widget.NewCheck(v.l.T("irc.use_tls"), nil)
 	channelsEntry := widget.NewEntry()
 	channelsEntry.SetPlaceHolder("#channel1, #channel2")
 	nickEntry := widget.NewEntry()
 	userEntry := widget.NewEntry()
 	realnameEntry := widget.NewEntry()
-	generateNickBtn := widget.NewButton("Neuen Nick generieren", nil)
-	nickServEnabled := widget.NewCheck("NickServ verwenden", nil)
+	generateNickBtn := widget.NewButton(v.l.T("action.generate_nick"), nil)
+	nickServEnabled := widget.NewCheck(v.l.T("irc.use_nickserv"), nil)
 	nickServCommand := widget.NewEntry()
 	nickServPassword := widget.NewPasswordEntry()
-	nickServPassword.SetPlaceHolder("Leer lassen = unverändert")
-	nickServDelete := widget.NewButton("NickServ-Passwort löschen", nil)
-	saslEnabled := widget.NewCheck("SASL verwenden", nil)
+	nickServPassword.SetPlaceHolder(v.l.T("irc.leave_unchanged"))
+	nickServDelete := widget.NewButton(v.l.T("action.delete_nickserv_password"), nil)
+	saslEnabled := widget.NewCheck(v.l.T("irc.use_sasl"), nil)
 	saslUsername := widget.NewEntry()
 	saslPassword := widget.NewPasswordEntry()
-	saslPassword.SetPlaceHolder("Leer lassen = unverändert")
-	saslDelete := widget.NewButton("SASL-Zugang löschen", nil)
+	saslPassword.SetPlaceHolder(v.l.T("irc.leave_unchanged"))
+	saslDelete := widget.NewButton(v.l.T("action.delete_sasl_access"), nil)
 	secretStatus := widget.NewLabel("")
 	secretStatus.Wrapping = fyne.TextWrapWord
 	defaultNick := widget.NewEntry()
 	defaultNick.SetText(strings.TrimSpace(current.DefaultNick))
-	defaultNick.SetPlaceHolder("z. B. silentFalcon42")
-	generateDefaultNick := widget.NewButton("Neu generieren", func() {
+	defaultNick.SetPlaceHolder(v.l.T("irc.default_nick_example"))
+	generateDefaultNick := widget.NewButton(v.l.T("action.generate_new"), func() {
 		defaultNick.SetText(internalirc.GenerateDefaultNick())
 	})
-	autoRegisterCheck := widget.NewCheck("Nick bei Bedarf automatisch registrieren", nil)
+	autoRegisterCheck := widget.NewCheck(v.l.T("irc.auto_register_if_required"), nil)
 	autoRegisterCheck.SetChecked(current.AutoRegister)
 	registrationEmail := widget.NewEntry()
 	registrationEmail.SetText(strings.TrimSpace(current.RegistrationEmail))
-	registrationEmail.SetPlaceHolder("E-Mail-Adresse für Nick-Registrierung")
-	reverseDCCCheck := widget.NewCheck("Reverse-/Passive-DCC-Angebote annehmen", nil)
+	registrationEmail.SetPlaceHolder(v.l.T("irc.registration_email_placeholder"))
+	reverseDCCCheck := widget.NewCheck(v.l.T("irc.accept_reverse_dcc"), nil)
 	reverseDCCCheck.SetChecked(current.ReverseDCCEnabled)
 	reverseDCCPortMin := widget.NewEntry()
 	reverseDCCPortMin.SetText(fmt.Sprintf("%d", current.ReverseDCCPortMin))
-	reverseDCCPortMin.SetPlaceHolder("z. B. 36080")
+	reverseDCCPortMin.SetPlaceHolder(v.l.T("irc.port_min_example"))
 	reverseDCCPortMax := widget.NewEntry()
 	reverseDCCPortMax.SetText(fmt.Sprintf("%d", current.ReverseDCCPortMax))
-	reverseDCCPortMax.SetPlaceHolder("z. B. 36090")
-	reverseDCCHint := widget.NewLabel("Nur für Bots nötig, die Reverse-/Passive-DCC verwenden. Der eingestellte TCP-Portbereich muss im Router/Firewall auf die interne IP dieses Clients weitergeleitet werden.")
+	reverseDCCPortMax.SetPlaceHolder(v.l.T("irc.port_max_example"))
+	reverseDCCHint := widget.NewLabel(v.l.T("irc.reverse_dcc_hint"))
 	reverseDCCHint.Wrapping = fyne.TextWrapWord
-	globalHint := widget.NewLabel("Diese IRC-Einstellungen werden nur lokal gespeichert. Zugangsdaten liegen in irc-secrets.json, nicht in client.json.")
+	globalHint := widget.NewLabel(v.l.T("irc.local_storage_hint"))
 	globalHint.Wrapping = fyne.TextWrapWord
-	localOnlyHint := widget.NewLabel("Networks und Channels werden aus Download-Aufträgen übernommen. Links wählst du vorhandene Einträge aus; rechts pflegst du lokale NickServ- und SASL-Daten. Passwortfelder bleiben leer, wenn bestehende Secrets unverändert bleiben sollen.")
+	localOnlyHint := widget.NewLabel(v.l.T("irc.local_only_hint"))
 	localOnlyHint.Wrapping = fyne.TextWrapWord
-	listHint := widget.NewLabel("Vorhandene Networks")
+	listHint := widget.NewLabel(v.l.T("irc.existing_networks"))
 	listHint.TextStyle = fyne.TextStyle{Bold: true}
 	selectedInfo := widget.NewLabel("")
 	selectedInfo.Wrapping = fyne.TextWrapWord
@@ -694,7 +697,7 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 			tlsCheck.SetChecked(false)
 			nickServEnabled.SetChecked(false)
 			saslEnabled.SetChecked(false)
-			selectedInfo.SetText("Noch keine IRC-Networks vorhanden. Sie werden automatisch angelegt, sobald ein Download-Auftrag für ein neues Network ankommt.")
+			selectedInfo.SetText(v.l.T("irc.no_networks"))
 			secretStatus.SetText("")
 			return
 		}
@@ -717,11 +720,11 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 		saslEnabled.SetChecked(n.SASL.Enabled)
 		saslUsername.SetText("")
 		saslPassword.SetText("")
-		selectedInfo.SetText(fmt.Sprintf("Ausgewähltes Network: %s (%s)", labelForNetwork(n, selected), channelSummary(n)))
+		selectedInfo.SetText(v.l.T("irc.selected_network", map[string]any{"Network": labelForNetwork(n, selected), "Channels": channelSummary(n)}))
 		if strings.TrimSpace(n.NickServ.Password) != "" || strings.TrimSpace(n.SASL.Username) != "" || strings.TrimSpace(n.SASL.Password) != "" {
-			secretStatus.SetText(buildIRCSecretStatus([]config.IRCNetwork{n}))
+			secretStatus.SetText(buildIRCSecretStatus(v.l, []config.IRCNetwork{n}))
 		} else {
-			secretStatus.SetText("Keine lokalen Zugangsdaten für dieses Network gespeichert.")
+			secretStatus.SetText(v.l.T("irc.no_credentials_for_network"))
 		}
 	}
 	applyFields := func() {
@@ -792,7 +795,7 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 	networkList := widget.NewList(
 		func() int { return len(networks) },
 		func() fyne.CanvasObject {
-			title := widget.NewLabel("Network")
+			title := widget.NewLabel(v.l.T("irc.network"))
 			title.TextStyle = fyne.TextStyle{Bold: true}
 			title.Wrapping = fyne.TextWrapWord
 			subtitle := widget.NewLabel("")
@@ -826,11 +829,11 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 	}
 
 	globalForm := widget.NewForm(
-		widget.NewFormItem("Default Nick", container.NewBorder(nil, nil, nil, generateDefaultNick, defaultNick)),
-		widget.NewFormItem("Auto-Registrierung", container.NewVBox(autoRegisterCheck, widget.NewLabel("Registrierungs-E-Mail"), registrationEmail)),
+		widget.NewFormItem(v.l.T("irc.default_nick"), container.NewBorder(nil, nil, nil, generateDefaultNick, defaultNick)),
+		widget.NewFormItem(v.l.T("irc.auto_registration"), container.NewVBox(autoRegisterCheck, widget.NewLabel(v.l.T("irc.registration_email")), registrationEmail)),
 		widget.NewFormItem("Reverse DCC", container.NewVBox(
 			reverseDCCCheck,
-			widget.NewLabel("DCC-Portbereich"),
+			widget.NewLabel(v.l.T("irc.dcc_port_range")),
 			container.NewGridWithColumns(2, reverseDCCPortMin, reverseDCCPortMax),
 			reverseDCCHint,
 			globalHint,
@@ -838,25 +841,25 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 	)
 
 	detailForm := widget.NewForm(
-		widget.NewFormItem("Anzeigename", nameEntry),
-		widget.NewFormItem("Host", hostEntry),
-		widget.NewFormItem("Port", portEntry),
+		widget.NewFormItem(v.l.T("irc.display_name"), nameEntry),
+		widget.NewFormItem(v.l.T("irc.host"), hostEntry),
+		widget.NewFormItem(v.l.T("irc.port"), portEntry),
 		widget.NewFormItem("TLS", tlsCheck),
-		widget.NewFormItem("Channels", channelsEntry),
-		widget.NewFormItem("Nick", container.NewBorder(nil, nil, nil, generateNickBtn, nickEntry)),
-		widget.NewFormItem("Username", userEntry),
-		widget.NewFormItem("Realname", realnameEntry),
+		widget.NewFormItem(v.l.T("irc.channels"), channelsEntry),
+		widget.NewFormItem(v.l.T("irc.nick"), container.NewBorder(nil, nil, nil, generateNickBtn, nickEntry)),
+		widget.NewFormItem(v.l.T("irc.username"), userEntry),
+		widget.NewFormItem(v.l.T("irc.realname"), realnameEntry),
 		widget.NewFormItem("NickServ", nickServEnabled),
-		widget.NewFormItem("NickServ Command", nickServCommand),
-		widget.NewFormItem("NickServ Passwort", container.NewVBox(nickServPassword, nickServDelete)),
+		widget.NewFormItem(v.l.T("irc.nickserv_command"), nickServCommand),
+		widget.NewFormItem(v.l.T("irc.nickserv_password"), container.NewVBox(nickServPassword, nickServDelete)),
 		widget.NewFormItem("SASL", saslEnabled),
-		widget.NewFormItem("SASL Username", saslUsername),
-		widget.NewFormItem("SASL Passwort", container.NewVBox(saslPassword, saslDelete)),
+		widget.NewFormItem(v.l.T("irc.sasl_username"), saslUsername),
+		widget.NewFormItem(v.l.T("irc.sasl_password"), container.NewVBox(saslPassword, saslDelete)),
 	)
 
 	leftPanel := container.NewBorder(
 		container.NewVBox(listHint),
-		widget.NewLabel("Keine manuelle Anlage nötig"),
+		widget.NewLabel(v.l.T("irc.no_manual_creation")),
 		nil,
 		nil,
 		networkList,
@@ -869,7 +872,7 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 	scroller.SetMinSize(fyne.NewSize(900, 640))
 	refreshList()
 
-	dlg := dialog.NewCustomConfirm("IRC-Einstellungen", "Speichern", "Schließen", scroller, func(ok bool) {
+	dlg := dialog.NewCustomConfirm(v.l.T("irc.title"), v.l.T("action.save"), v.l.T("action.close"), scroller, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -896,10 +899,10 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 			err := svc.UpdateLocalSettings(strings.TrimSpace(svc.DownloadDir()), updatedIRC, updatedIRC.AutoRegister, updatedIRC.RegistrationEmail)
 			fyne.Do(func() {
 				if err != nil {
-					v.setActionText(err.Error())
+					v.setActionText(v.l.UserError(err.Error()))
 					return
 				}
-				v.setActionText("IRC-Einstellungen gespeichert.")
+				v.setActionText(v.l.T("notice.irc_settings_saved"))
 				v.refresh(svc)
 			})
 		}()
@@ -909,15 +912,15 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 }
 
 func (v *mainView) confirmRePair(w fyne.Window, svc *app.Service) {
-	dialog.ShowConfirm("Client neu koppeln?", "Der Client wird vom aktuellen Konto getrennt und muss anschließend erneut gekoppelt werden.\n\nLokale Einstellungen wie der Download-Ordner bleiben erhalten.\nDie Verbindung zum Server wird zurückgesetzt.\n\nMöchtest du fortfahren?", func(ok bool) {
+	dialog.ShowConfirm(v.l.T("repair.title"), v.l.T("repair.message"), func(ok bool) {
 		if !ok {
 			return
 		}
 		if err := svc.StartRePair(); err != nil {
-			v.setActionText(err.Error())
+			v.setActionText(v.l.UserError(err.Error()))
 			return
 		}
-		v.setActionText("Neues Pairing wurde gestartet.")
+		v.setActionText(v.l.T("notice.repair_started"))
 		v.refresh(svc)
 	}, w)
 }
@@ -949,19 +952,19 @@ func deriveUIState(snap observe.Snapshot) uiState {
 	return uiStateIdle
 }
 
-func buildStatusLine(snap observe.Snapshot) string {
+func buildStatusLine(l *localization.Localizer, snap observe.Snapshot) string {
 	if !snap.Paired {
-		if msg := strings.TrimSpace(snap.PairingStatus); msg != "" {
-			return msg
+		if code := strings.TrimSpace(snap.PairingStatus); code != "" {
+			return l.Status(code)
 		}
-		return "Nicht gekoppelt"
+		return l.T("status.not_paired")
 	}
 	if d := snap.ActiveDownload; d != nil {
 		parts := []string{}
 		if d.Total <= 0 && d.Downloaded <= 0 {
-			parts = append(parts, "Verbinden")
+			parts = append(parts, l.T("status.connect_download"))
 		} else {
-			parts = append(parts, "Download")
+			parts = append(parts, l.T("status.download"))
 		}
 		if target := strings.TrimSpace(d.Target); target != "" {
 			parts = append(parts, target)
@@ -979,21 +982,21 @@ func buildStatusLine(snap observe.Snapshot) string {
 		if d.SpeedBps > 0 {
 			parts = append(parts, fmt.Sprintf("%s/s", formatBytes(int64(d.SpeedBps))))
 		}
-		if eta := formatDurationSeconds(d.ETASeconds); eta != "" {
+		if eta := l.FormatDurationSeconds(d.ETASeconds); eta != "" {
 			parts = append(parts, "ETA "+eta)
 		}
 		return strings.Join(parts, " · ")
 	}
 	if msg := strings.TrimSpace(snap.LastError); msg != "" {
-		return "Fehler · " + msg
+		return l.T("status.error", map[string]any{"Message": l.UserError(msg)})
 	}
 	if snap.Connected {
-		return "Verbunden"
+		return l.T("status.connected")
 	}
 	if snap.Running {
-		return "Verbindung wird aufgebaut"
+		return l.T("status.connecting")
 	}
-	return "Bereit"
+	return l.T("status.ready")
 }
 
 func buildPairingURL(raw, code string) string {
@@ -1027,43 +1030,16 @@ func orDash(value string) string {
 	return value
 }
 
-func settingsPairingStatus(snap observe.Snapshot) string {
+func settingsPairingStatus(l *localization.Localizer, snap observe.Snapshot) string {
 	switch {
 	case !snap.Paired && strings.TrimSpace(snap.PairingStatus) != "":
-		return snap.PairingStatus
+		return l.Status(snap.PairingStatus)
 	case !snap.Paired:
-		return "Nicht gekoppelt"
+		return l.T("status.not_paired")
 	case snap.Connected:
-		return "Gekoppelt und verbunden"
+		return l.T("status.paired_connected")
 	default:
-		return "Gekoppelt"
-	}
-}
-
-func formatRemainingTimestamp(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	t, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return ""
-	}
-	d := time.Until(t)
-	switch {
-	case d <= 0:
-		return "abgelaufen"
-	case d < time.Minute:
-		return fmt.Sprintf("noch %d s", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("noch %d min", int(d.Minutes()))
-	default:
-		h := int(d.Hours())
-		m := int(d.Minutes()) % 60
-		if m == 0 {
-			return fmt.Sprintf("noch %d h", h)
-		}
-		return fmt.Sprintf("noch %d h %d min", h, m)
+		return l.T("status.paired")
 	}
 }
 
@@ -1082,40 +1058,4 @@ func formatBytes(n int64) string {
 		return fmt.Sprintf("%d %s", n, units[u])
 	}
 	return fmt.Sprintf("%.1f %s", v, units[u])
-}
-
-func formatDurationSeconds(sec int64) string {
-	if sec <= 0 {
-		return ""
-	}
-	d := time.Duration(sec) * time.Second
-	if d < time.Minute {
-		return fmt.Sprintf("%d s", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		m := int(d.Minutes())
-		s := int(d.Seconds()) % 60
-		if s == 0 {
-			return fmt.Sprintf("%d min", m)
-		}
-		return fmt.Sprintf("%d min %d s", m, s)
-	}
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	if m == 0 {
-		return fmt.Sprintf("%d h", h)
-	}
-	return fmt.Sprintf("%d h %d min", h, m)
-}
-
-func formatTimestamp(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	t, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return raw
-	}
-	return t.Local().Format("02.01.2006 15:04:05")
 }

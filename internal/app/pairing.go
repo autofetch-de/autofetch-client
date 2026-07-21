@@ -9,6 +9,7 @@ import (
 	"github.com/autofetch-de/autofetch-client/internal/api"
 	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/localization"
 )
 
 func normalizeArch(arch string) string {
@@ -26,7 +27,10 @@ func normalizeArch(arch string) string {
 	}
 }
 
-func runPairingFlow(cfg *config.Config, info buildinfo.Info) error {
+func runPairingFlow(cfg *config.Config, info buildinfo.Info, l *localization.Localizer) error {
+	if l == nil {
+		l = localization.New(info.Language)
+	}
 	apiClient := api.New(cfg.ServerBaseURL, "", "")
 	apiClient.HTTP.Timeout = 60 * time.Second
 
@@ -43,8 +47,12 @@ func runPairingFlow(cfg *config.Config, info buildinfo.Info) error {
 		return err
 	}
 
-	fmt.Printf("Pairing code: %s\n", start.PairingCode)
-	fmt.Printf("Open: %s/clients/new\n", strings.TrimRight(cfg.ServerBaseURL, "/"))
+	if cfg.PrintCodeOnly {
+		fmt.Println(start.PairingCode)
+	} else {
+		fmt.Println(l.T("cli.pairing_code", map[string]any{"Code": start.PairingCode}))
+		fmt.Println(l.T("cli.open", map[string]any{"URL": strings.TrimRight(cfg.ServerBaseURL, "/") + "/clients/new"}))
+	}
 
 	pollEvery := time.Duration(start.PollAfterSeconds) * time.Second
 	if pollEvery <= 0 {

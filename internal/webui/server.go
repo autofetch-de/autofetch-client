@@ -15,6 +15,7 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
+	"github.com/autofetch-de/autofetch-client/internal/localization"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
 )
 
@@ -35,11 +36,15 @@ type Server struct {
 	service service
 	http    *http.Server
 	addr    string
+	l       *localization.Localizer
 }
 
-func New(addr string, state *observe.State, service service) *Server {
+func New(addr string, state *observe.State, service service, l *localization.Localizer) *Server {
+	if l == nil {
+		l = localization.New(localization.English)
+	}
 	mux := http.NewServeMux()
-	s := &Server{state: state, service: service, addr: addr}
+	s := &Server{state: state, service: service, addr: addr, l: l}
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/start", s.handleStart)
@@ -78,8 +83,9 @@ func OpenBrowser(url string) error {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	snap := s.state.Snapshot()
-	network, channel := parseIRCAuthContext(snap.LastError)
+	rawSnap := s.state.Snapshot()
+	snap := s.localizeSnapshot(rawSnap)
+	network, channel := parseIRCAuthContext(rawSnap.LastError)
 	setupLink := "/irc/setup"
 	if network != "" || channel != "" {
 		v := url.Values{}
@@ -91,19 +97,32 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		setupLink += "?" + v.Encode()
 	}
-	data := map[string]any{"Title": "autofetch status", "Snapshot": snap, "ShowIRCAuth": strings.Contains(strings.ToLower(snap.LastError), "irc_registered_nick_required"), "IRCSetupLink": setupLink, "IRCNetwork": network, "IRCChannel": channel}
+	data := map[string]any{"Title": s.l.T("web.title"), "Lang": s.l.Language(), "T": s.l.T, "Snapshot": snap, "ShowIRCAuth": strings.Contains(strings.ToLower(rawSnap.LastError), "irc_registered_nick_required"), "IRCSetupLink": setupLink, "IRCNetwork": network, "IRCChannel": channel}
 	_ = pageTemplate.Execute(w, data)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.state.Snapshot())
+	_ = json.NewEncoder(w).Encode(s.localizedSnapshot())
 }
 
-func writeJSONError(w http.ResponseWriter, code int, err error) {
+func (s *Server) localizedSnapshot() observe.Snapshot {
+	return s.localizeSnapshot(s.state.Snapshot())
+}
+
+func (s *Server) localizeSnapshot(snap observe.Snapshot) observe.Snapshot {
+	snap.PairingStatus = s.l.Status(snap.PairingStatus)
+	snap.LastDownloadStatus = s.l.Status(snap.LastDownloadStatus)
+	snap.LastError = s.l.UserError(snap.LastError)
+	snap.LastPoll = s.l.FormatTimestamp(snap.LastPoll)
+	snap.PairingExpiry = s.l.FormatTimestamp(snap.PairingExpiry)
+	return snap
+}
+
+func (s *Server) writeJSONError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": s.l.UserError(err.Error())})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +131,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.service.Start(); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err)
+		s.writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -125,7 +144,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.service.Stop(); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err)
+		s.writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -143,7 +162,7 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": s.l.UserError(err.Error())})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -155,7 +174,7 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.service.StartRePair(); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err)
+		s.writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -189,8 +208,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, errMsg string) {
 	data := map[string]any{
-		"Title":       "Einstellungen",
-		"Error":       errMsg,
+		"Title":       s.l.T("settings.title"),
+		"Lang":        s.l.Language(),
+		"T":           s.l.T,
+		"Error":       s.l.UserError(errMsg),
 		"DownloadDir": s.service.DownloadDir(),
 	}
 	_ = settingsTemplate.Execute(w, data)
@@ -347,7 +368,7 @@ func (s *Server) renderIRCSetup(w http.ResponseWriter, r *http.Request, errMsg s
 	if len(selected.Channels) > 0 {
 		channel = selected.Channels[0]
 	}
-	data := map[string]any{"Title": "IRC-Einstellungen", "Error": errMsg, "DefaultNick": ircCfg.DefaultNick, "AutoRegister": ircCfg.AutoRegister, "RegistrationEmail": ircCfg.RegistrationEmail, "ReverseDCCEnabled": ircCfg.ReverseDCCEnabled, "ReverseDCCPortMin": ircCfg.ReverseDCCPortMin, "ReverseDCCPortMax": ircCfg.ReverseDCCPortMax, "Network": selected, "Channel": channel, "Networks": ircCfg.Networks}
+	data := map[string]any{"Title": s.l.T("irc.title"), "Lang": s.l.Language(), "T": s.l.T, "Error": s.l.UserError(errMsg), "DefaultNick": ircCfg.DefaultNick, "AutoRegister": ircCfg.AutoRegister, "RegistrationEmail": ircCfg.RegistrationEmail, "ReverseDCCEnabled": ircCfg.ReverseDCCEnabled, "ReverseDCCPortMin": ircCfg.ReverseDCCPortMin, "ReverseDCCPortMax": ircCfg.ReverseDCCPortMax, "Network": selected, "Channel": channel, "Networks": ircCfg.Networks}
 	_ = ircSetupTemplate.Execute(w, data)
 }
 
@@ -405,162 +426,84 @@ func parseIRCAuthContext(msg string) (string, string) {
 }
 
 var pageTemplate = template.Must(template.New("index").Parse(`<!doctype html>
-<html lang="de">
+<html lang="{{.Lang}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f6f7f9; color: #1f2937; }
-    .wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
-    .card { background: white; border-radius: 12px; box-shadow: 0 1px 6px rgba(0,0,0,.08); padding: 16px 18px; margin-bottom: 16px; }
-    h1, h2 { margin: 0 0 12px; }
-    h1 { font-size: 24px; }
-    h2 { font-size: 20px; }
-    .grid { display: grid; grid-template-columns: 220px 1fr; gap: 10px 14px; }
-    .label { color: #6b7280; }
-    .status { font-weight: 600; }
-    .online { color: #047857; }
-    .offline { color: #b91c1c; }
-    .buttons { display: flex; gap: 10px; flex-wrap: wrap; }
-    button, a.button { border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; }
-    .primary { background: #111827; color: white; }
-    .secondary { background: #e5e7eb; color: #111827; }
-    .code { display: inline-flex; align-items: center; gap: 10px; padding: 12px 14px; background: #111827; color: #fff; border-radius: 12px; font-weight: 700; font-size: 28px; letter-spacing: 2px; }
-    .muted { color: #6b7280; }
-    pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 10px; min-height: 220px; overflow: auto; }
-    .hint { color: #6b7280; font-size: 13px; margin-top: 8px; }
-    .hidden { display: none; }
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:980px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px;margin-bottom:16px}h1,h2{margin:0 0 12px}h1{font-size:24px}h2{font-size:20px}.grid{display:grid;grid-template-columns:220px 1fr;gap:10px 14px}.value{overflow-wrap:anywhere}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.danger{background:#fee2e2;color:#991b1b}.status{font-weight:700}.note{font-size:13px;color:#6b7280}.warning{background:#fff7ed;color:#9a3412;padding:12px;border-radius:10px;margin-top:12px}pre{background:#111827;color:#e5e7eb;padding:14px;border-radius:10px;min-height:180px;max-height:360px;overflow:auto;white-space:pre-wrap}.pair-code{font-size:30px;font-weight:800;letter-spacing:.12em;text-align:center;padding:14px}.hidden{display:none}@media(max-width:640px){.grid{grid-template-columns:1fr}.pair-code{font-size:24px}}
   </style>
 </head>
-<body>
+<body data-working="{{call .T "web.working"}}" data-ok="{{call .T "web.ok"}}" data-failed="{{call .T "web.failed"}}" data-connection-successful="{{call .T "notice.connection_successful"}}" data-log-copied="{{call .T "notice.log_copied"}}" data-log-copy-failed="{{call .T "notice.log_copy_failed"}}" data-code-copied="{{call .T "notice.pairing_code_copied"}}" data-copy-failed="{{call .T "notice.copy_failed"}}" data-yes="{{call .T "web.yes"}}" data-no="{{call .T "web.no"}}">
 <div class="wrap">
+  <div class="card"><h1>{{.Title}}</h1><div id="action-result" class="status"></div></div>
+  <div id="pairing-card" class="card">
+    <h2>{{call .T "web.pairing"}}</h2>
+    <div id="pairing_status" class="status"></div>
+    <div id="pairing_code" class="pair-code">—</div>
+    <div id="pairing_expiry" class="note"></div>
+    <div class="actions"><button class="primary" onclick="copyCode()">{{call .T "web.copy_pairing_code"}}</button><a id="pairing-link" class="button secondary" target="_blank" rel="noopener">{{call .T "action.open_pairing_page"}}</a></div>
+  </div>
   <div class="card">
-    <h1>autofetch client</h1>
-    <div class="buttons">
-      <button class="primary" onclick="action('/api/start', 'Start angefordert')">Start</button>
-      <a class="button secondary" href="/settings">Einstellungen</a>
-      <button class="secondary" onclick="action('/api/stop', 'Stop angefordert')">Stop</button>
-      <button class="secondary" onclick="action('/api/test')">Verbindung testen</button>
-      <button class="secondary" onclick="action('/api/repair', 'Neues Pairing gestartet')">Neu koppeln</button>
-    </div>
-    <div class="hint" id="action-result"></div>
-  </div>
-
-  <div class="card" id="pairing-card">
-    <h2>Client koppeln</h2>
-    <p>Dieser Client ist noch nicht gekoppelt. Öffne bitte diese Seite:</p>
-    <p><a id="pairing-link" target="_blank" rel="noreferrer"></a></p>
-    <p>Gib dort anschließend diesen Kopplungscode ein:</p>
-    <div class="code"><span id="pairing-code">-</span><button class="secondary" onclick="copyCode()">Kopieren</button></div>
-    <p class="hint">Status: <span id="pairing-status">-</span></p>
-    <p class="hint">Ablauf: <span id="pairing-expiry">-</span></p>
-  </div>
-
-  <div class="card hidden" id="status-card">
+    <h2>{{call .T "web.runtime"}}</h2>
     <div class="grid">
-      <div class="label">Status</div><div id="connected"></div>
-      <div class="label">Server-URL</div><div id="server_url"></div>
-      <div class="label">Client-ID</div><div id="client_id"></div>
-      <div class="label">Letzter Poll</div><div id="last_poll"></div>
-      <div class="label">Aktueller Job</div><div id="current_job"></div>
-      <div class="label">Letzter Download</div><div id="last_download"></div>
-      <div class="label">Letzte Fehlermeldung</div><div id="last_error"></div>
+      <div>{{call .T "web.connected"}}</div><div id="connected" class="value">—</div>
+      <div>{{call .T "web.running"}}</div><div id="running" class="value">—</div>
+      <div>{{call .T "web.server"}}</div><div id="server_url" class="value">—</div>
+      <div>{{call .T "web.client_id"}}</div><div id="client_id" class="value">—</div>
+      <div>{{call .T "web.last_poll"}}</div><div id="last_poll" class="value">—</div>
+      <div>{{call .T "web.current_job"}}</div><div id="current_job" class="value">—</div>
+      <div>{{call .T "web.last_download"}}</div><div id="last_download" class="value">—</div>
+      <div>{{call .T "web.last_error"}}</div><div id="last_error" class="value">—</div>
+    </div>
+    {{if .ShowIRCAuth}}<div class="warning">{{call .T "web.irc_auth_required"}} {{if .IRCNetwork}}<strong>{{.IRCNetwork}}</strong>{{end}}{{if .IRCChannel}} · {{.IRCChannel}}{{end}}<div class="actions"><a class="button secondary" href="{{.IRCSetupLink}}">{{call .T "web.open_irc_settings"}}</a></div></div>{{end}}
+    <div class="actions">
+      <button class="primary" onclick="action('/api/start')">{{call .T "web.start"}}</button>
+      <button class="secondary" onclick="action('/api/stop')">{{call .T "web.stop"}}</button>
+      <button class="secondary" onclick="action('/api/test')">{{call .T "action.test_connection"}}</button>
+      <button class="danger" onclick="action('/api/repair')">{{call .T "web.repair"}}</button>
+      <a class="button secondary" href="/settings">{{call .T "action.settings"}}</a>
+      <a class="button secondary" href="/irc/setup">{{call .T "irc.title"}}</a>
     </div>
   </div>
-
-  <div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;"><div class="label">Log-Auszug</div><button class="secondary" onclick="copyLogs()">Log kopieren</button></div>
-    <pre id="logs" onmousedown="logSelecting=true" onmouseup="setTimeout(() => logSelecting=false, 250)" onmouseleave="setTimeout(() => logSelecting=false, 250)"></pre>
-  </div>
+  <div class="card"><h2>{{call .T "web.logs"}}</h2><pre id="logs"></pre><div class="actions"><button class="secondary" onclick="copyLogs()">{{call .T "action.copy_log"}}</button></div></div>
 </div>
 <script>
+const text = document.body.dataset;
 let lastCode = '';
 let logSelecting = false;
-
-function setText(id, value) {
-  document.getElementById(id).textContent = value || '-';
+const logs = document.getElementById('logs');
+logs.addEventListener('mousedown',()=>{logSelecting=true});
+window.addEventListener('mouseup',()=>{logSelecting=false});
+function setText(id,value){document.getElementById(id).textContent=value||'—'}
+function updateView(s){
+  lastCode=s.pairing_code||'';
+  document.getElementById('pairing-card').classList.toggle('hidden',!!s.paired);
+  setText('pairing_status',s.pairing_status);
+  setText('pairing_code',s.pairing_code);
+  setText('pairing_expiry',s.pairing_expiry);
+  const link=document.getElementById('pairing-link');
+  let url=s.pairing_url||'https://autofetch.de/clients/new';
+  if(s.pairing_code){const u=new URL(url);u.searchParams.set('pairing_code',s.pairing_code);url=u.toString()}
+  link.href=url;
+  setText('connected',s.connected?text.yes:text.no);setText('running',s.running?text.yes:text.no);
+  setText('server_url',s.server_url);setText('client_id',s.client_id);setText('last_poll',s.last_poll);setText('current_job',s.current_job);
+  const lastDownload=[s.last_download,s.last_download_status].filter(Boolean).join(' · ');setText('last_download',lastDownload);setText('last_error',s.last_error);
+  if(!logSelecting&&!window.getSelection().toString())logs.textContent=(s.logs||[]).join('\n');
 }
-
-function updateView(s) {
-  const paired = !!s.paired;
-  document.getElementById('pairing-card').classList.toggle('hidden', paired);
-  document.getElementById('status-card').classList.toggle('hidden', !paired);
-
-  setText('pairing-code', s.pairing_code);
-  setText('pairing-status', s.pairing_status);
-  setText('pairing-expiry', s.pairing_expiry);
-  const link = document.getElementById('pairing-link');
-  link.textContent = s.pairing_url || '-';
-  link.href = s.pairing_url || '#';
-  lastCode = s.pairing_code || '';
-
-  const c = document.getElementById('connected');
-  c.textContent = s.connected ? 'verbunden' : (s.running ? 'offline' : 'gestoppt');
-  c.className = 'status ' + (s.connected ? 'online' : 'offline');
-  setText('server_url', s.server_url);
-  setText('client_id', s.client_id);
-  setText('last_poll', s.last_poll);
-  setText('current_job', s.current_job);
-  setText('last_download', s.last_download);
-  setText('last_error', s.last_error);
-  if (!logSelecting && !window.getSelection().toString()) {
-    document.getElementById('logs').textContent = (s.logs || []).join('\n');
-  }
-}
-
-async function refresh() {
-  const res = await fetch('/api/status');
-  const s = await res.json();
-  updateView(s);
-}
-
-async function action(path, successMsg) {
-  const out = document.getElementById('action-result');
-  out.textContent = 'arbeite...';
-  const res = await fetch(path, { method: 'POST' });
-  let msg = successMsg || (res.ok ? 'ok' : 'fehler');
-  try {
-    const data = await res.json();
-    if (data && data.error) msg = data.error;
-    if (data && data.ok && path === '/api/test') msg = 'Verbindung erfolgreich';
-  } catch (_) {}
-  out.textContent = msg;
-  refresh();
-}
-
-async function copyLogs() {
-  const text = document.getElementById('logs').textContent || '';
-  try {
-    await navigator.clipboard.writeText(text);
-    document.getElementById('action-result').textContent = 'Log kopiert';
-  } catch (_) {
-    document.getElementById('action-result').textContent = 'Log konnte nicht kopiert werden';
-  }
-}
-
-async function copyCode() {
-  if (!lastCode) return;
-  try {
-    await navigator.clipboard.writeText(lastCode);
-    document.getElementById('action-result').textContent = 'Kopplungscode kopiert';
-  } catch (_) {
-    document.getElementById('action-result').textContent = 'Kopieren fehlgeschlagen';
-  }
-}
-
-refresh();
-setInterval(refresh, 2000);
+async function refresh(){try{const res=await fetch('/api/status');updateView(await res.json())}catch(_){}}
+async function action(path){const out=document.getElementById('action-result');out.textContent=text.working;const res=await fetch(path,{method:'POST'});let msg=res.ok?text.ok:text.failed;try{const data=await res.json();if(data&&data.error)msg=data.error;if(data&&data.ok&&path==='/api/test')msg=text.connectionSuccessful}catch(_){}out.textContent=msg;refresh()}
+async function copyLogs(){try{await navigator.clipboard.writeText(logs.textContent||'');document.getElementById('action-result').textContent=text.logCopied}catch(_){document.getElementById('action-result').textContent=text.logCopyFailed}}
+async function copyCode(){if(!lastCode)return;try{await navigator.clipboard.writeText(lastCode);document.getElementById('action-result').textContent=text.codeCopied}catch(_){document.getElementById('action-result').textContent=text.copyFailed}}
+refresh();setInterval(refresh,2000);
 </script>
-</body>
-</html>`))
+</body></html>`))
 
 var settingsTemplate = template.Must(template.New("settings").Parse(`<!doctype html>
-<html lang="de">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:900px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px;margin-bottom:16px}label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}input[type=checkbox]{width:auto;margin-right:8px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#6b7280;margin-top:12px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}</style></head>
-<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p>Allgemeine Einstellungen des Clients.</p>{{if .Error}}<div class="error">{{.Error}}</div>{{end}}<form method="post" action="/settings"><label>Download-Ordner</label><input name="download_dir" value="{{.DownloadDir}}"><p class="note">IRC-Networks, NickServ, SASL, Default Nick und Auto-Register bearbeitest du auf der separaten IRC-Seite.</p><div class="actions"><button class="primary" type="submit">Speichern</button><a class="button secondary" href="/irc/setup">IRC-Einstellungen</a><a class="button secondary" href="/">Zurück</a></div></form></div></div></body></html>`))
+<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:900px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px}label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#6b7280;margin-top:12px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}</style></head>
+<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p>{{call .T "settings.general_intro"}}</p>{{if .Error}}<div class="error">{{.Error}}</div>{{end}}<form method="post" action="/settings"><label>{{call .T "settings.download_folder"}}</label><input name="download_dir" value="{{.DownloadDir}}"><p class="note">{{call .T "settings.irc_separate_hint"}}</p><div class="actions"><button class="primary" type="submit">{{call .T "action.save"}}</button><a class="button secondary" href="/irc/setup">{{call .T "irc.title"}}</a><a class="button secondary" href="/">{{call .T "action.back"}}</a></div></form></div></div></body></html>`))
 
 var ircSetupTemplate = template.Must(template.New("ircsetup").Parse(`<!doctype html>
-<html lang="de">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:980px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px;margin-bottom:16px}label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}input[type=checkbox]{width:auto;margin-right:8px}.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.layout{display:grid;grid-template-columns:280px 1fr;gap:16px}.netlist{display:flex;flex-direction:column;gap:10px}.netitem{display:block;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;text-decoration:none;color:#111827;background:#fff}.netitem strong{display:block}.netitem small{display:block;color:#6b7280;margin-top:4px}.netitem.active{border-color:#111827;background:#f9fafb}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#6b7280;margin-top:12px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}@media (max-width:760px){.row,.layout{grid-template-columns:1fr}}</style></head>
-<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p>Diese Daten werden nur lokal gespeichert und niemals an autofetch gesendet. Passwörter liegen in irc-secrets.json, nicht in client.json.</p>{{if .Error}}<div class="error">{{.Error}}</div>{{end}}<div class="layout"><div><h2>Networks</h2><div class="note">Networks und Channels werden automatisch aus Download-Aufträgen übernommen. Hier wählst du vorhandene Einträge aus und pflegst nur lokale NickServ-/SASL-Zugangsdaten sowie globale IRC-Optionen.</div><div class="netlist">{{range .Networks}}<a class="netitem {{if eq .Host $.Network.Host}}active{{end}}" href="/irc/setup?network={{.Host}}"><strong>{{if .Name}}{{.Name}}{{else}}{{.Host}}{{end}}</strong><small>{{.Host}}:{{.Port}}{{if .Channels}} · {{index .Channels 0}}{{end}}</small></a>{{end}}</div></div><div><form method="post" action="/irc/setup"><h2>Globale IRC-Einstellungen</h2><label>Default Nick</label><input name="default_nick" value="{{.DefaultNick}}"><div><label><input type="checkbox" name="auto_register" {{if .AutoRegister}}checked{{end}}>Nick automatisch registrieren, wenn ein Network dies verlangt</label></div><label>Registrierungs-E-Mail</label><input type="email" name="registration_email" value="{{.RegistrationEmail}}"><h2 style="margin-top:22px">Reverse DCC</h2><div><label><input type="checkbox" name="reverse_dcc_enabled" {{if .ReverseDCCEnabled}}checked{{end}}>Reverse-/Passive-DCC-Downloads annehmen</label></div><div class="row"><div><label>DCC-Port von</label><input name="reverse_dcc_port_min" value="{{.ReverseDCCPortMin}}"></div><div><label>DCC-Port bis</label><input name="reverse_dcc_port_max" value="{{.ReverseDCCPortMax}}"></div></div><p class="note">Manche Bots senden Dateien per Reverse DCC. Dafür muss dein Router eingehende TCP-Verbindungen im hier eingestellten Portbereich an die lokale IP dieses Geräts weiterleiten. Die öffentliche IP ermittelt der Client automatisch; nur bei Problemen kann sie per AUTOFETCH_DCC_PUBLIC_IP überschrieben werden.</p><h2 style="margin-top:22px">Network</h2><div class="row"><div><label>Anzeigename</label><input name="name" value="{{.Network.Name}}"></div><div><label>Host</label><input name="host" value="{{.Network.Host}}"></div></div><div class="row"><div><label>Channel</label><input name="channel" value="{{.Channel}}"></div><div><label>Port</label><input name="port" value="{{.Network.Port}}"></div></div><div><label><input type="checkbox" name="tls" {{if .Network.TLS}}checked{{end}}>TLS verwenden</label></div><div class="row"><div><label>Nick</label><input name="nick" value="{{.Network.Nick}}"></div><div><label>Username</label><input name="username" value="{{.Network.Username}}"></div></div><label>Realname</label><input name="realname" value="{{.Network.Realname}}"><h2>NickServ</h2><div><label><input type="checkbox" name="nickserv_enabled" {{if .Network.NickServ.Enabled}}checked{{end}}>NickServ verwenden</label></div><div class="row"><div><label>Command</label><input name="nickserv_command" value="{{.Network.NickServ.Command}}"></div><div><label>Passwort</label><input type="password" name="nickserv_password" value="" placeholder="unverändert lassen, um bestehendes Passwort zu behalten"></div></div><div><label><input type="checkbox" name="clear_nickserv_password">Bestehendes NickServ-Passwort löschen</label></div><h2>SASL</h2><div><label><input type="checkbox" name="sasl_enabled" {{if .Network.SASL.Enabled}}checked{{end}}>SASL verwenden</label></div><div class="row"><div><label>Username</label><input name="sasl_username" value="" placeholder="unverändert lassen, um bestehenden Wert zu behalten"></div><div><label>Passwort</label><input type="password" name="sasl_password" value="" placeholder="unverändert lassen, um bestehendes Passwort zu behalten"></div></div><div><label><input type="checkbox" name="clear_sasl_username">Bestehenden SASL-Username löschen</label></div><div><label><input type="checkbox" name="clear_sasl_password">Bestehendes SASL-Passwort löschen</label></div><div class="actions"><button class="secondary" type="submit" name="generate_nick" value="1">Neuen Nick generieren</button><button class="primary" type="submit">Speichern</button><a class="button secondary" href="/settings">Allgemeine Einstellungen</a><a class="button secondary" href="/">Zurück</a></div></form></div></div></div></div></body></html>`))
+<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:980px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px}label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}input[type=checkbox]{width:auto;margin-right:8px}.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.layout{display:grid;grid-template-columns:280px 1fr;gap:16px}.netlist{display:flex;flex-direction:column;gap:10px}.netitem{display:block;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;text-decoration:none;color:#111827;background:#fff}.netitem.active{border-color:#111827;background:#f9fafb}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#6b7280;margin-top:12px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}@media(max-width:760px){.row,.layout{grid-template-columns:1fr}}</style></head>
+<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p>{{call .T "irc.data_privacy"}}</p>{{if .Error}}<div class="error">{{.Error}}</div>{{end}}<div class="layout"><div><h2>{{call .T "irc.networks"}}</h2><div class="note">{{call .T "irc.web_networks_hint"}}</div><div class="netlist">{{range .Networks}}<a class="netitem {{if eq .Host $.Network.Host}}active{{end}}" href="/irc/setup?network={{.Host}}"><strong>{{if .Name}}{{.Name}}{{else}}{{.Host}}{{end}}</strong><small>{{.Host}}:{{.Port}}{{if .Channels}} · {{index .Channels 0}}{{end}}</small></a>{{end}}</div></div><div><form method="post" action="/irc/setup"><h2>{{call .T "irc.global_settings"}}</h2><label>{{call .T "irc.default_nick"}}</label><input name="default_nick" value="{{.DefaultNick}}"><div><label><input type="checkbox" name="auto_register" {{if .AutoRegister}}checked{{end}}>{{call .T "irc.auto_register_if_required"}}</label></div><label>{{call .T "irc.registration_email"}}</label><input type="email" name="registration_email" value="{{.RegistrationEmail}}"><h2>Reverse DCC</h2><div><label><input type="checkbox" name="reverse_dcc_enabled" {{if .ReverseDCCEnabled}}checked{{end}}>{{call .T "irc.accept_reverse_dcc"}}</label></div><div class="row"><div><label>{{call .T "irc.port_from"}}</label><input name="reverse_dcc_port_min" value="{{.ReverseDCCPortMin}}"></div><div><label>{{call .T "irc.port_to"}}</label><input name="reverse_dcc_port_max" value="{{.ReverseDCCPortMax}}"></div></div><p class="note">{{call .T "irc.reverse_dcc_web_hint"}}</p><h2>{{call .T "irc.network"}}</h2><div class="row"><div><label>{{call .T "irc.display_name"}}</label><input name="name" value="{{.Network.Name}}"></div><div><label>{{call .T "irc.host"}}</label><input name="host" value="{{.Network.Host}}"></div></div><div class="row"><div><label>{{call .T "irc.channel"}}</label><input name="channel" value="{{.Channel}}"></div><div><label>{{call .T "irc.port"}}</label><input name="port" value="{{.Network.Port}}"></div></div><div><label><input type="checkbox" name="tls" {{if .Network.TLS}}checked{{end}}>{{call .T "irc.use_tls"}}</label></div><div class="row"><div><label>{{call .T "irc.nick"}}</label><input name="nick" value="{{.Network.Nick}}"></div><div><label>{{call .T "irc.username"}}</label><input name="username" value="{{.Network.Username}}"></div></div><label>{{call .T "irc.realname"}}</label><input name="realname" value="{{.Network.Realname}}"><h2>NickServ</h2><div><label><input type="checkbox" name="nickserv_enabled" {{if .Network.NickServ.Enabled}}checked{{end}}>{{call .T "irc.use_nickserv"}}</label></div><div class="row"><div><label>{{call .T "irc.nickserv_command"}}</label><input name="nickserv_command" value="{{.Network.NickServ.Command}}"></div><div><label>{{call .T "irc.nickserv_password"}}</label><input type="password" name="nickserv_password" placeholder="{{call .T "irc.leave_unchanged"}}"></div></div><div><label><input type="checkbox" name="clear_nickserv_password">{{call .T "action.delete_nickserv_password"}}</label></div><h2>SASL</h2><div><label><input type="checkbox" name="sasl_enabled" {{if .Network.SASL.Enabled}}checked{{end}}>{{call .T "irc.use_sasl"}}</label></div><div class="row"><div><label>{{call .T "irc.sasl_username"}}</label><input name="sasl_username" placeholder="{{call .T "irc.leave_unchanged"}}"></div><div><label>{{call .T "irc.sasl_password"}}</label><input type="password" name="sasl_password" placeholder="{{call .T "irc.leave_unchanged"}}"></div></div><div><label><input type="checkbox" name="clear_sasl_username">{{call .T "action.delete_sasl_access"}}</label></div><div><label><input type="checkbox" name="clear_sasl_password">{{call .T "action.delete_sasl_access"}}</label></div><div class="actions"><button class="secondary" type="submit" name="generate_nick" value="1">{{call .T "action.generate_nick"}}</button><button class="primary" type="submit">{{call .T "action.save"}}</button><a class="button secondary" href="/settings">{{call .T "settings.title"}}</a><a class="button secondary" href="/">{{call .T "action.back"}}</a></div></form></div></div></div></div></body></html>`))
