@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- Support filename-based IRC download commands in addition to numbered XDCC packs.
+- Resume interrupted DCC downloads with RESUME/ACCEPT handling and safety checks.
+- Optional local ZIP, TAR, RAR and 7z extraction with configurable layout, disk-space checks, progress and explicit retry.
+- Local download and archive history in the Web UI, plus an activity view in the desktop client.
+- Manual client update notifications for stable releases; no automatic installation.
+
+### Changed
+
+- Improve IRC offer waiting, download handling and controlled client shutdown.
+- Pause server polling after repeated invalid client credentials, until re-pairing.
+- Document the opt-in legacy-CN TLS compatibility behavior for trusted certificates.
+
 ## 1.1.0 - 2026-07-21
 
 ### Added

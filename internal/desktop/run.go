@@ -29,6 +29,9 @@ import (
 
 func Run(ctx context.Context, svc *app.Service) error {
 	l := svc.Localizer()
+	updateCtx, cancelUpdates := context.WithCancel(ctx)
+	defer cancelUpdates()
+	go svc.RunUpdateChecker(updateCtx)
 	a := fyneapp.NewWithID("de.autofetch.client")
 	a.SetIcon(assets.AppIconPNG)
 	w := a.NewWindow("autofetch-client")
@@ -57,6 +60,7 @@ func Run(ctx context.Context, svc *app.Service) error {
 		pauseItem := fyne.NewMenuItem(l.T("action.pause"), func() {
 			view.stopOrPause(svc)
 		})
+		activityItem := fyne.NewMenuItem(l.T("activity.title"), func() { view.openActivityWindow(svc) })
 		settingsItem := fyne.NewMenuItem(l.T("action.settings"), func() {
 			view.openSettingsDialog(w, svc)
 		})
@@ -65,6 +69,16 @@ func Run(ctx context.Context, svc *app.Service) error {
 		})
 		versionItem := fyne.NewMenuItem("Version "+svc.BuildInfo().Version, func() {})
 		versionItem.Disabled = true
+		updateItem := fyne.NewMenuItem(l.T("update.available_short"), func() {
+			status := svc.UpdateStatus()
+			if !status.Available {
+				return
+			}
+			if target, err := url.Parse(status.DownloadURL); err == nil {
+				_ = a.OpenURL(target)
+			}
+		})
+		updateItem.Disabled = true
 		quitItem := fyne.NewMenuItem(l.T("action.quit"), func() {
 			quitting = true
 			_ = svc.Stop()
@@ -77,15 +91,19 @@ func Run(ctx context.Context, svc *app.Service) error {
 			fyne.NewMenuItemSeparator(),
 			startItem,
 			pauseItem,
+			activityItem,
 			settingsItem,
 			repairPairingItem,
 			fyne.NewMenuItemSeparator(),
 			versionItem,
+			updateItem,
 			quitItem,
 		)
 		view.trayApp = desk
 		desk.SetSystemTrayIcon(assets.TrayIconPending)
 		desk.SetSystemTrayMenu(menu)
+		view.updateTrayItem = updateItem
+		view.updateTrayMenu = menu
 	}
 
 	if err := svc.Start(); err != nil {
@@ -93,6 +111,7 @@ func Run(ctx context.Context, svc *app.Service) error {
 	}
 
 	go func() {
+		var lastActivityRefresh time.Time
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -102,6 +121,11 @@ func Run(ctx context.Context, svc *app.Service) error {
 			case <-ticker.C:
 				fyne.Do(func() {
 					view.refresh(svc)
+					view.refreshUpdate(svc)
+					if view.activityWindow != nil && time.Since(lastActivityRefresh) > 10*time.Second {
+						view.refreshActivityWindow(svc)
+						lastActivityRefresh = time.Now()
+					}
 				})
 			}
 		}
@@ -110,6 +134,35 @@ func Run(ctx context.Context, svc *app.Service) error {
 	w.ShowAndRun()
 	_ = svc.Stop()
 	return nil
+}
+
+func (v *mainView) refreshUpdate(svc *app.Service) {
+	status := svc.UpdateStatus()
+	nextVersion := ""
+	if status.Available {
+		nextVersion = status.Latest
+	}
+	if v.lastUpdateVersion == nextVersion {
+		return
+	}
+	v.lastUpdateVersion = nextVersion
+	if status.Available {
+		label := fmt.Sprintf("%s %s", v.l.T("update.available_short"), status.Latest)
+		v.updateAction.SetText(label)
+		v.updateAction.Show()
+		if v.updateTrayItem != nil {
+			v.updateTrayItem.Label = label
+			v.updateTrayItem.Disabled = false
+		}
+	} else {
+		v.updateAction.Hide()
+		if v.updateTrayItem != nil {
+			v.updateTrayItem.Disabled = true
+		}
+	}
+	if v.trayApp != nil && v.updateTrayMenu != nil {
+		v.trayApp.SetSystemTrayMenu(v.updateTrayMenu)
+	}
 }
 
 type uiState int
@@ -133,6 +186,16 @@ type mainView struct {
 	secondaryAction     *widget.Button
 	settingsAction      *widget.Button
 	repairPairingAction *widget.Button
+	activityAction      *widget.Button
+	updateAction        *widget.Button
+	updateTrayItem      *fyne.MenuItem
+	updateTrayMenu      *fyne.Menu
+	lastUpdateVersion   string
+	activityWindow      fyne.Window
+	activityHistory     *fyne.Container
+	activityArchives    *fyne.Container
+	activityLogs        *widget.Entry
+	activityMessage     *widget.Label
 
 	contentHolder *fyne.Container
 
@@ -169,10 +232,21 @@ func newMainView(w fyne.Window, svc *app.Service) *mainView {
 	v.settingsAction = widget.NewButtonWithIcon(v.l.T("action.settings"), theme.SettingsIcon(), func() {
 		v.openSettingsDialog(w, svc)
 	})
+	v.activityAction = widget.NewButton(v.l.T("activity.title"), func() { v.openActivityWindow(svc) })
+	v.updateAction = widget.NewButton(v.l.T("update.available_short"), func() {
+		status := svc.UpdateStatus()
+		if !status.Available {
+			return
+		}
+		if target, err := url.Parse(status.DownloadURL); err == nil {
+			_ = fyne.CurrentApp().OpenURL(target)
+		}
+	})
+	v.updateAction.Hide()
 	v.repairPairingAction = widget.NewButtonWithIcon(v.l.T("action.repair"), theme.ViewRefreshIcon(), func() {
 		v.confirmRePair(w, svc)
 	})
-	for _, btn := range []*widget.Button{v.primaryAction, v.secondaryAction, v.settingsAction, v.repairPairingAction} {
+	for _, btn := range []*widget.Button{v.primaryAction, v.secondaryAction, v.settingsAction, v.repairPairingAction, v.activityAction} {
 		btn.Importance = widget.LowImportance
 	}
 
@@ -232,6 +306,8 @@ func newMainView(w fyne.Window, svc *app.Service) *mainView {
 		v.primaryAction,
 		v.secondaryAction,
 		v.settingsAction,
+		v.activityAction,
+		v.updateAction,
 		v.repairPairingAction,
 	)
 	top := container.NewPadded(container.NewVBox(

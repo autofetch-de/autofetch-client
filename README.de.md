@@ -153,3 +153,38 @@ Die gemeinsame Übersetzungsarchitektur und der manuelle Testablauf sind reposit
 ## Lizenz
 
 Der autofetch-Client steht unter der MIT-Lizenz. Einzelheiten stehen in `LICENSE`.
+
+## Optionale Archivextraktion
+
+Die Extraktion ist standardmäßig **ausgeschaltet**. ZIP, TAR, RAR und 7z wurden inzwischen im lokalen Praxistest bestätigt; RAR und 7z benötigen weiterhin `7zz` oder `7z` im PATH. Ein Entpackfehler ändert den erfolgreichen Downloadstatus nicht. Der lokale Status ist über `GET /api/archives` (nur Loopback) abrufbar.
+
+Die Ablage- und Bereinigungsoptionen sind unabhängig voneinander und auch in `client.json` hinterlegbar:
+
+```json
+{
+  "extract_archives": true,
+  "extract_layout": "same",
+  "extract_delete_original": true,
+  "extract_nested_depth": 0
+}
+```
+
+- `extract_layout`: `separate` (Standard, `<Dateiname>.extracted/`) oder `same` (intelligente Ablage im Download-Verzeichnis). Bei **einer** Nutzdatei entsteht direkt die Datei (`Film.rar` → `Film.mkv`), bei **mehreren** Nutzdateien ein Ordner mit dem Archivnamen ohne Endung (`Sammlung.rar` → `Sammlung/`). Enthält das Archiv bereits einen gemeinsamen Hauptordner, wird dieser übernommen. Gleichnamige Dateien oder Ordner werden nie überschrieben.
+- `extract_delete_original`: `false` (Standard) oder `true`. Löscht das Original **erst nach** vollständiger Extraktion, sicherer Veröffentlichung und dauerhaftem Abschlussnachweis; bei mehrteiligen Archiven auch die zugehörigen Volumes.
+- `extract_nested_depth`: `0` (Standard); `1` bis `3` sind **BETA**. Verschachtelte Archive bleiben optional und noch nicht realitätsnah durchgetestet.
+
+**Hinweis zu Startparametern:** Ohne explizite Archiv-Flags gelten die Werte der lokalen `client.json` (bzw. die darüberliegenden Umgebungsvariablen). Insbesondere ist ein zuvor gespeichertes `extract_delete_original: true` weiterhin aktiv. Für einen Start ohne automatische Extraktion/Löschung ausdrücklich `--extract-archives=false --extract-delete-original=false` setzen. Der Client protokolliert die effektiven Archivoptionen beim Start.
+
+Entsprechende Startparameter: `--extract-archives --extract-layout=same --extract-delete-original`; alternativ `AUTOFETCH_EXTRACT_LAYOUT=same` und `AUTOFETCH_EXTRACT_DELETE_ORIGINAL=1`. Die JSON-Dateien des Download-Journals und der Extraktionshistorie bleiben **bewusst** erhalten, damit ein später erneut zugewiesener Auftrag keinen unnötigen Download auslöst. Die temporäre JSON-Markierung der Extraktion wird bei `same` nicht in das Download-Verzeichnis übernommen. Ein bereits abgeschlossener Vorgang wird durch spätere Einstellungsänderungen nicht rückwirkend verändert. Bei einer Kollision oder einem fehlerhaften Archiv bleibt das Original erhalten. Die Verarbeitung benötigt zunächst genug Speicher für Archiv und extrahierte Inhalte. Mehrteilige RAR/7z- und verschachtelte Archive sollten bis zum Praxistest als Beta betrachtet werden.
+
+**Extraktionsfortschritt und Speicherplatz:** Vor dem Entpacken liest der Client die Dateigrößen aus ZIP-, TAR-, RAR- und 7z-Archivinformationen und vergleicht die geschätzte Ausgabegröße plus Sicherheitsreserve mit dem freien Platz auf dem Dateisystem des Download-Ordners. Bei offensichtlich zu wenig Platz lautet der Fehler `archive_insufficient_disk_space`; das Original wird nicht verändert. Insbesondere bei großen TAR/TAR.GZ-Dateien kann das vollständige Einlesen der Metadaten Zeit benötigen. Eine Prüfung kann keinen gleichzeitigen Speicherverbrauch durch andere Prozesse vorhersagen. Die verschachtelte Extraktion (Beta) kann zusätzlichen Platz benötigen; die erste Schätzung bezieht sich nur auf die äußere Ebene. Verarbeitete Bytes, geschätztes Gesamtvolumen und die Phasen `verifying`, `preflight`, `extracting`, `nested` und `publishing` stehen unter `GET /api/archives` zur Verfügung und werden während der Verarbeitung in der lokalen Weboberfläche angezeigt.
+
+### Lokale Weboberfläche: Historie und Archive
+
+Unter `http://127.0.0.1:23324` zeigt der Client die letzten 20 lokalen Downloadaufträge und Archivverarbeitungen aus den bestehenden Journals. Fehlgeschlagene Extraktionen können dort mit **Extraktion wiederholen** erneut eingereiht werden (ohne erneuten Download oder Server-Lease). Die vollständigen letzten 100 lokalen Datensätze bleiben über `/api/history` und `/api/archives` verfügbar. Die Historie wird alle 12 Sekunden, die Archivansicht alle 2 Sekunden aktualisiert. Beide Datenschnittstellen sind auf Loopback-Zugriffe beschränkt.
+
+**Weboberfläche:** Downloadhistorie, Archivwarteschlange und Logs sind standardmäßig eingeklappt. Einträge lassen sich einzeln oder gesammelt aus der **lokalen Ansicht** entfernen. Diese Auswahl bleibt auf dem Client erhalten, bis sich ein Auftrag erneut ändert; das zugehörige technische Download-Journal, heruntergeladene Dateien, Archiv-Warteschlange und die Serverhistorie werden dadurch **nicht** gelöscht. Die Logs bleiben flüchtig.
+
+Unter **Einstellungen** können außerdem automatische Extraktion, Ablageort, Originaldatei-Löschung und die verschachtelte Extraktion (Beta) geändert werden. Für diese Aktion ist eine lokale, ausdrücklich autorisierte Anfrage erforderlich. Bei aktivem Client wird der Worker kontrolliert beendet und mit der neuen Konfiguration gestartet; unvollständige Transfers behalten ihre Resume-Dateien. Die neue Konfiguration gilt nur für künftig gestartete Extraktionen und wird in `client.json` gespeichert. Explizite CLI-Flags und Umgebungsvariablen können beim nächsten Programmstart weiterhin Vorrang haben.
+
+**Desktop-GUI:** Über **Aktivitäten** lassen sich lokale Downloadhistorie, Archivwarteschlange und Logs in einem separaten, einklappbaren Fenster anzeigen. Einzelne bzw. alle Historieneinträge können aus der lokalen Ansicht ausgeblendet werden (technische Belege und Serverhistorie bleiben erhalten). Fehlgeschlagene Extraktionen lassen sich ohne erneuten Download erneut einreihen. Aktualisierung alle 10 Sekunden sowie per Schaltfläche. Die fachlichen Archivrichtlinien werden weiterhin ausschließlich im autofetch-Portal eingestellt.

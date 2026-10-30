@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -35,13 +36,14 @@ func runPairingFlow(cfg *config.Config, info buildinfo.Info, l *localization.Loc
 	apiClient.HTTP.Timeout = 60 * time.Second
 
 	start, err := apiClient.RegisterStart(context.Background(), api.RegisterStartRequest{
-		ClientName:  cfg.ClientName,
-		Platform:    info.Platform,
-		Arch:        info.Arch,
-		Version:     info.Version,
-		Variant:     info.Variant,
-		BuildCommit: info.BuildCommit,
-		BuildDate:   info.BuildDate,
+		ClientName:         cfg.ClientName,
+		Platform:           info.Platform,
+		Arch:               info.Arch,
+		Version:            info.Version,
+		Variant:            info.Variant,
+		BuildCommit:        info.BuildCommit,
+		BuildDate:          info.BuildDate,
+		ClientProtocolInfo: api.CurrentProtocolInfo(cfg.InstanceID),
 	})
 	if err != nil {
 		return err
@@ -50,8 +52,7 @@ func runPairingFlow(cfg *config.Config, info buildinfo.Info, l *localization.Loc
 	if cfg.PrintCodeOnly {
 		fmt.Println(start.PairingCode)
 	} else {
-		fmt.Println(l.T("cli.pairing_code", map[string]any{"Code": start.PairingCode}))
-		fmt.Println(l.T("cli.open", map[string]any{"URL": strings.TrimRight(cfg.ServerBaseURL, "/") + "/clients/new"}))
+		writePairingBanner(os.Stdout, l, start.PairingCode, strings.TrimRight(cfg.ServerBaseURL, "/")+"/clients/new")
 	}
 
 	pollEvery := time.Duration(start.PollAfterSeconds) * time.Second

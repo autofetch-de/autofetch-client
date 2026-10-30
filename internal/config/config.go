@@ -70,6 +70,25 @@ type IRCSASLSecrets struct {
 	Password string `json:"password"`
 }
 
+// ArchiveOptions is the local client policy. It never modifies an already
+// running or completed extraction job retroactively.
+type ArchiveOptions struct {
+	Enabled        bool   `json:"extract_archives"`
+	Layout         string `json:"extract_layout"`
+	DeleteOriginal bool   `json:"extract_delete_original"`
+	NestedDepth    int    `json:"extract_nested_depth"`
+}
+
+func (o ArchiveOptions) Validate() error {
+	if o.Layout != "separate" && o.Layout != "same" {
+		return fmt.Errorf("invalid archive layout")
+	}
+	if o.NestedDepth < 0 || o.NestedDepth > 3 {
+		return fmt.Errorf("invalid archive nested depth")
+	}
+	return nil
+}
+
 type Config struct {
 	ConfigPath string
 
@@ -78,12 +97,18 @@ type Config struct {
 
 	ClientID    string
 	ClientToken string
+	InstanceID  string // stable random installation UUID, independent of pairing credentials
 
-	PairedAt  *time.Time
-	RevokedAt *time.Time
+	PairedAt     *time.Time
+	RevokedAt    *time.Time
+	AuthPausedAt *time.Time
 
-	DownloadDir string
-	IRC         IRCConfig
+	DownloadDir           string
+	ExtractArchives       bool   // optional local extraction of supported archives, default OFF
+	ExtractNestedDepth    int    // 0=off, 1..3 additional nested layers (BETA)
+	ExtractLayout         string // separate (default) or same
+	ExtractDeleteOriginal bool   // deletion only after safely published extraction
+	IRC                   IRCConfig
 
 	HeartbeatInterval      time.Duration
 	HeartbeatExtendSeconds int
@@ -201,6 +226,19 @@ func Load(l *localization.Localizer) Config {
 	if v := os.Getenv("DOWNLOAD_DIR"); v != "" {
 		c.DownloadDir = v
 	}
+	c.ExtractArchives = boolEnv("AUTOFETCH_EXTRACT_ARCHIVES", c.ExtractArchives)
+	if c.ExtractLayout == "" {
+		c.ExtractLayout = "separate"
+	}
+	if v := os.Getenv("AUTOFETCH_EXTRACT_LAYOUT"); v != "" {
+		c.ExtractLayout = v
+	}
+	c.ExtractDeleteOriginal = boolEnv("AUTOFETCH_EXTRACT_DELETE_ORIGINAL", c.ExtractDeleteOriginal)
+	if v := os.Getenv("AUTOFETCH_EXTRACT_NESTED_DEPTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 3 {
+			c.ExtractNestedDepth = n
+		}
+	}
 
 	c.HeartbeatInterval = time.Duration(atoiEnv("HEARTBEAT_INTERVAL_SECONDS", 20)) * time.Second
 	c.HeartbeatExtendSeconds = atoiEnv("HEARTBEAT_EXTEND_SECONDS", 600)
@@ -218,6 +256,10 @@ func Load(l *localization.Localizer) Config {
 	flag.StringVar(&c.ClientID, "client-id", c.ClientID, "CLIENT_ID (uuid)")
 	flag.StringVar(&c.ClientToken, "token", c.ClientToken, "CLIENT_TOKEN (X-Client-Token)")
 	flag.StringVar(&c.DownloadDir, "dir", c.DownloadDir, "DOWNLOAD_DIR")
+	flag.BoolVar(&c.ExtractArchives, "extract-archives", c.ExtractArchives, "DEPRECATED (ignored): set extraction in the autofetch portal")
+	flag.IntVar(&c.ExtractNestedDepth, "extract-nested-depth", c.ExtractNestedDepth, "DEPRECATED (ignored): nested archive depth BETA is configured in the portal")
+	flag.StringVar(&c.ExtractLayout, "extract-layout", c.ExtractLayout, "DEPRECATED (ignored): extraction layout is configured in the portal")
+	flag.BoolVar(&c.ExtractDeleteOriginal, "extract-delete-original", c.ExtractDeleteOriginal, "DEPRECATED (ignored): original deletion is configured in the portal")
 	flag.BoolVar(&c.RePair, "re-pair", false, l.T("flag.repair"))
 	flag.BoolVar(&c.PrintCodeOnly, "print-code-only", false, l.T("flag.print_code_only"))
 	flag.BoolVar(&c.EnableWebUI, "webui", c.EnableWebUI, l.T("flag.webui"))
@@ -251,6 +293,20 @@ func Load(l *localization.Localizer) Config {
 		if c.ClientToken == "" {
 			c.ClientToken = persisted.ClientToken
 		}
+		// Explicit --config identifies a separate installation configuration.
+		if !flagPassed("extract-archives") && os.Getenv("AUTOFETCH_EXTRACT_ARCHIVES") == "" {
+			c.ExtractArchives = persisted.ExtractArchives
+		}
+		if !flagPassed("extract-nested-depth") && os.Getenv("AUTOFETCH_EXTRACT_NESTED_DEPTH") == "" {
+			c.ExtractNestedDepth = persisted.ExtractNestedDepth
+		}
+		if !flagPassed("extract-layout") && os.Getenv("AUTOFETCH_EXTRACT_LAYOUT") == "" {
+			c.ExtractLayout = persisted.ExtractLayout
+		}
+		if !flagPassed("extract-delete-original") && os.Getenv("AUTOFETCH_EXTRACT_DELETE_ORIGINAL") == "" {
+			c.ExtractDeleteOriginal = persisted.ExtractDeleteOriginal
+		}
+		c.InstanceID = persisted.InstanceID
 		if c.ServerBaseURL == "" {
 			c.ServerBaseURL = persisted.ServerBaseURL
 		}
@@ -266,11 +322,20 @@ func Load(l *localization.Localizer) Config {
 		if c.RevokedAt == nil {
 			c.RevokedAt = persisted.RevokedAt
 		}
+		if c.AuthPausedAt == nil {
+			c.AuthPausedAt = persisted.AuthPausedAt
+		}
 		if c.IRC.DefaultNick == "" && len(c.IRC.Networks) == 0 {
 			c.IRC = persisted.IRC.WithDefaults()
 		}
 	}
 
+	if c.ExtractNestedDepth < 0 || c.ExtractNestedDepth > 3 {
+		c.ExtractNestedDepth = 0
+	}
+	if c.ExtractLayout != "separate" && c.ExtractLayout != "same" {
+		c.ExtractLayout = "separate"
+	}
 	c.IRC = c.IRC.WithDefaults()
 	return c
 }
@@ -290,23 +355,35 @@ func Persist(c Config) error {
 	}
 
 	payload := struct {
-		ServerBaseURL string     `json:"server_base_url"`
-		ClientID      string     `json:"client_id"`
-		ClientToken   string     `json:"client_token"`
-		PairedAt      *time.Time `json:"paired_at,omitempty"`
-		ClientName    string     `json:"client_name"`
-		DownloadDir   string     `json:"download_dir"`
-		RevokedAt     *time.Time `json:"revoked_at,omitempty"`
-		IRC           IRCConfig  `json:"irc"`
+		ServerBaseURL         string     `json:"server_base_url"`
+		ClientID              string     `json:"client_id"`
+		ClientToken           string     `json:"client_token"`
+		InstanceID            string     `json:"instance_id,omitempty"`
+		PairedAt              *time.Time `json:"paired_at,omitempty"`
+		ClientName            string     `json:"client_name"`
+		DownloadDir           string     `json:"download_dir"`
+		ExtractArchives       bool       `json:"extract_archives,omitempty"`
+		ExtractNestedDepth    int        `json:"extract_nested_depth,omitempty"`
+		ExtractLayout         string     `json:"extract_layout,omitempty"`
+		ExtractDeleteOriginal bool       `json:"extract_delete_original,omitempty"`
+		RevokedAt             *time.Time `json:"revoked_at,omitempty"`
+		AuthPausedAt          *time.Time `json:"auth_paused_at,omitempty"`
+		IRC                   IRCConfig  `json:"irc"`
 	}{
-		ServerBaseURL: c.ServerBaseURL,
-		ClientID:      c.ClientID,
-		ClientToken:   c.ClientToken,
-		PairedAt:      c.PairedAt,
-		ClientName:    c.ClientName,
-		DownloadDir:   c.DownloadDir,
-		RevokedAt:     c.RevokedAt,
-		IRC:           sanitizedIRC,
+		ServerBaseURL:         c.ServerBaseURL,
+		ClientID:              c.ClientID,
+		ClientToken:           c.ClientToken,
+		InstanceID:            c.InstanceID,
+		PairedAt:              c.PairedAt,
+		ClientName:            c.ClientName,
+		DownloadDir:           c.DownloadDir,
+		ExtractArchives:       c.ExtractArchives,
+		ExtractNestedDepth:    c.ExtractNestedDepth,
+		ExtractLayout:         c.ExtractLayout,
+		ExtractDeleteOriginal: c.ExtractDeleteOriginal,
+		RevokedAt:             c.RevokedAt,
+		AuthPausedAt:          c.AuthPausedAt,
+		IRC:                   sanitizedIRC,
 	}
 	bs, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -329,6 +406,7 @@ func ClearCredentials(c *Config) error {
 	c.ClientToken = ""
 	c.PairedAt = nil
 	c.RevokedAt = nil
+	c.AuthPausedAt = nil
 	if c.ConfigPath == "" {
 		return nil
 	}
@@ -356,14 +434,20 @@ func loadFromFile(c *Config, path string) error {
 		return err
 	}
 	var payload struct {
-		ServerBaseURL string     `json:"server_base_url"`
-		ClientID      string     `json:"client_id"`
-		ClientToken   string     `json:"client_token"`
-		PairedAt      *time.Time `json:"paired_at,omitempty"`
-		ClientName    string     `json:"client_name"`
-		DownloadDir   string     `json:"download_dir"`
-		RevokedAt     *time.Time `json:"revoked_at,omitempty"`
-		IRC           IRCConfig  `json:"irc"`
+		ServerBaseURL         string     `json:"server_base_url"`
+		ClientID              string     `json:"client_id"`
+		ClientToken           string     `json:"client_token"`
+		InstanceID            string     `json:"instance_id,omitempty"`
+		PairedAt              *time.Time `json:"paired_at,omitempty"`
+		ClientName            string     `json:"client_name"`
+		DownloadDir           string     `json:"download_dir"`
+		ExtractArchives       bool       `json:"extract_archives,omitempty"`
+		ExtractNestedDepth    int        `json:"extract_nested_depth,omitempty"`
+		ExtractLayout         string     `json:"extract_layout,omitempty"`
+		ExtractDeleteOriginal bool       `json:"extract_delete_original,omitempty"`
+		RevokedAt             *time.Time `json:"revoked_at,omitempty"`
+		AuthPausedAt          *time.Time `json:"auth_paused_at,omitempty"`
+		IRC                   IRCConfig  `json:"irc"`
 	}
 	if err := json.Unmarshal(bs, &payload); err != nil {
 		return err
@@ -380,11 +464,23 @@ func loadFromFile(c *Config, path string) error {
 	if payload.DownloadDir != "" {
 		c.DownloadDir = payload.DownloadDir
 	}
+	c.ExtractArchives = payload.ExtractArchives
+	if payload.ExtractNestedDepth >= 0 && payload.ExtractNestedDepth <= 3 {
+		c.ExtractNestedDepth = payload.ExtractNestedDepth
+	}
+	if payload.ExtractLayout == "same" {
+		c.ExtractLayout = "same"
+	} else {
+		c.ExtractLayout = "separate"
+	}
+	c.ExtractDeleteOriginal = payload.ExtractDeleteOriginal
 	if payload.ClientToken != "" {
 		c.ClientToken = payload.ClientToken
 	}
+	c.InstanceID = payload.InstanceID
 	c.PairedAt = payload.PairedAt
 	c.RevokedAt = payload.RevokedAt
+	c.AuthPausedAt = payload.AuthPausedAt
 	c.IRC = payload.IRC.WithDefaults()
 
 	secrets, err := loadIRCSecrets(path)

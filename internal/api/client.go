@@ -11,8 +11,31 @@ import (
 	"time"
 )
 
-// RevokedError is returned when the server tells us the client no longer exists
-// or has been disabled.
+// AuthDeniedError denotes the server's specific invalid-credentials response.
+// A generic 403 (such as access policy denial) must never suspend the client.
+type AuthDeniedError struct {
+	Status int
+}
+
+func (e *AuthDeniedError) Error() string { return "invalid client credentials" }
+func IsAuthDenied(err error) bool {
+	var e *AuthDeniedError
+	return errors.As(err, &e)
+}
+
+func authError(status int, body APIErrorResponse) error {
+	if status == http.StatusForbidden && strings.EqualFold(body.Error, "CLIENT_REVOKED_OR_MISSING") {
+		return &RevokedError{Status: status, Msg: "CLIENT_REVOKED_OR_MISSING"}
+	}
+	if (status == http.StatusForbidden || status == http.StatusUnauthorized) &&
+		strings.EqualFold(strings.TrimSpace(body.Error), "forbidden") &&
+		strings.EqualFold(strings.TrimSpace(body.Message), "invalid client credentials") {
+		return &AuthDeniedError{Status: status}
+	}
+	return nil
+}
+
+// RevokedError is returned when the server explicitly revokes a client.
 type RevokedError struct {
 	Status int
 	Msg    string
@@ -36,6 +59,7 @@ type Client struct {
 	ClientToken string
 	HTTP        *http.Client
 	Metadata    ClientMetadata
+	Protocol    ClientProtocolInfo
 }
 
 func New(baseURL, clientID, token string) *Client {
@@ -97,8 +121,8 @@ func (c *Client) doJSON(ctx context.Context, method, path string, in any, out an
 	if status < 200 || status >= 300 {
 		var e APIErrorResponse
 		_ = json.NewDecoder(resp.Body).Decode(&e) // best-effort
-		if status == 403 && strings.EqualFold(e.Error, "CLIENT_REVOKED_OR_MISSING") {
-			return status, &RevokedError{Status: status, Msg: "CLIENT_REVOKED_OR_MISSING"}
+		if authErr := authError(status, e); authErr != nil {
+			return status, authErr
 		}
 		return status, fmt.Errorf("%s %s failed: status=%d body=%v", method, path, status, e)
 	}
@@ -131,16 +155,12 @@ func (c *Client) GetRuntimeConfig(ctx context.Context) (*RuntimeConfigResponse, 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, false, nil
 	}
-	if resp.StatusCode == http.StatusForbidden {
-		var e APIErrorResponse
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		if strings.EqualFold(e.Error, "CLIENT_REVOKED_OR_MISSING") {
-			return nil, false, &RevokedError{Status: resp.StatusCode, Msg: "CLIENT_REVOKED_OR_MISSING"}
-		}
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e APIErrorResponse
 		_ = json.NewDecoder(resp.Body).Decode(&e)
+		if authErr := authError(resp.StatusCode, e); authErr != nil {
+			return nil, false, authErr
+		}
 		return nil, false, fmt.Errorf("GET /api/client/v1/config failed: status=%d body=%v", resp.StatusCode, e)
 	}
 
@@ -175,7 +195,7 @@ func (c *Client) LeaseJob(ctx context.Context) (*LeaseResponse, error) {
 		ctx,
 		http.MethodPost,
 		"/api/client/v1/jobs/lease",
-		LeaseRequest{ClientID: c.ClientID, ClientMetadata: c.Metadata},
+		LeaseRequest{ClientID: c.ClientID, ClientMetadata: c.Metadata, ClientProtocolInfo: c.Protocol},
 		&out,
 	)
 	return &out, err

@@ -3,15 +3,17 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/archive"
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/download"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
@@ -22,6 +24,11 @@ import (
 // ErrClientRevoked is returned when the server responds with
 // HTTP 403 {"error":"CLIENT_REVOKED_OR_MISSING"}.
 var ErrClientRevoked = errors.New("client revoked or deleted by server")
+
+// ErrClientAuthSuspended is deliberately distinct from a confirmed revocation.
+// The application pauses until the user explicitly pairs again.
+var ErrClientAuthSuspended = errors.New("authentication suspended after repeated invalid credentials; re-pair required")
+var errLeaseLost = errors.New("completion_lease_lost")
 
 const stopModeGetterContextKey = "autofetch.stop_mode_getter"
 
@@ -39,13 +46,22 @@ type Runner struct {
 
 	ClientID string
 
-	DownloadDir string
+	DownloadDir           string
+	JournalDir            string
+	ArchiveQueueDir       string
+	ExtractArchives       bool
+	ExtractNestedDepth    int
+	ExtractLayout         string
+	ExtractDeleteOriginal bool
+	archiveQueue          *archive.Queue
 
 	// Optional IRC identity (used for XDCC)
 	IRCNick       string
 	IRCConfig     *config.Config
 	PersistConfig func() error
 
+	// AuthRetryDelay overrides the default 30s delay for deterministic tests.
+	AuthRetryDelay    time.Duration
 	HeartbeatInterval time.Duration
 	HeartbeatExtend   int
 	DedupeTTLSeconds  int
@@ -76,11 +92,15 @@ func (r *Runner) bandwidthLimitBytesPerSec() int64 {
 	return int64(cfg.BandwidthLimitKiBPerSec) * 1024
 }
 
-// completeWithRetry retries complete() a few times to survive transient transport errors.
-// It does NOT retry ErrClientRevoked, and it treats 409 (late complete) as success (complete() returns nil).
+// completeWithRetry retries only result reporting, never IRC/HTTP transfers.
+// A 409 means the lease was lost, NOT an acknowledged completion.
 func (r *Runner) completeWithRetry(ctx context.Context, job *api.LeasedJob, status, errStr string, data map[string]any) error {
 	delays := []time.Duration{0, 2 * time.Second, 5 * time.Second}
 	var lastErr error
+	journal := DownloadJournal{Dir: r.JournalDir}
+	if err := journal.SetReportState(r.ClientID, job.JobID, job.Lease.AttemptID, status, errStr, "pending"); err != nil {
+		log.Printf("journal report pending: %v", err)
+	}
 
 	for i, d := range delays {
 		if d > 0 {
@@ -93,7 +113,20 @@ func (r *Runner) completeWithRetry(ctx context.Context, job *api.LeasedJob, stat
 
 		err := r.complete(ctx, job, status, errStr, data)
 		if err == nil {
+			if jerr := journal.SetReportState(r.ClientID, job.JobID, job.Lease.AttemptID, status, errStr, "acknowledged"); jerr != nil {
+				log.Printf("journal report ack: %v", jerr)
+			} else if status == "SUCCESS" {
+				if err := r.pruneReceiptIfSettled(job.JobID, job.Payload.ArchiveProcessing); err != nil {
+					log.Printf("journal prune deferred: %v", err)
+				}
+			}
 			return nil
+		}
+		if errors.Is(err, errLeaseLost) {
+			if jerr := journal.SetReportState(r.ClientID, job.JobID, job.Lease.AttemptID, status, errStr, "lease_lost"); jerr != nil {
+				log.Printf("journal lease lost: %v", jerr)
+			}
+			return err
 		}
 		if err == ErrClientRevoked {
 			return ErrClientRevoked
@@ -108,8 +141,49 @@ func (r *Runner) completeWithRetry(ctx context.Context, job *api.LeasedJob, stat
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	if r.ArchiveQueueDir != "" {
+		archiveCtx, stopArchive := context.WithCancel(ctx)
+		archiveDone := make(chan struct{})
+		defer func() {
+			stopArchive()
+			// Do not start another runner while the previous extraction still
+			// owns files. Reads/writes check cancellation regularly.
+			select {
+			case <-archiveDone:
+			case <-time.After(5 * time.Second):
+				log.Printf("archive worker shutdown timeout")
+			}
+		}()
+		r.archiveQueue = &archive.Queue{Dir: r.ArchiveQueueDir, OnlyPlanned: true, BeforeRemove: func(clientID, jobID, source, digest, destination string) error {
+			return (DownloadJournal{Dir: r.JournalDir}).MarkPostProcessed(clientID, jobID, source, digest, destination)
+		}}
+		go func() { defer close(archiveDone); r.runArchiveQueue(archiveCtx) }()
+	}
 	bo := &Backoff{Min: 500 * time.Millisecond, Max: 30 * time.Second}
 	lastConfigRefresh := time.Time{}
+	consecutiveAuthDenials := 0
+	authRetryDelay := r.AuthRetryDelay
+	if authRetryDelay <= 0 {
+		authRetryDelay = 30 * time.Second
+	}
+	// Each denial is checked in isolation; do not perform a second server
+	// request (config + lease) during the same failed authentication cycle.
+	authDenied := func(err error) (bool, bool) {
+		if !api.IsAuthDenied(err) {
+			consecutiveAuthDenials = 0
+			return false, false
+		}
+		consecutiveAuthDenials++
+		return true, consecutiveAuthDenials >= 3
+	}
+	waitAfterAuthDenial := func() error {
+		select {
+		case <-time.After(authRetryDelay):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	obs := r.Observer
 	if obs == nil {
 		obs = observe.NopObserver{}
@@ -117,6 +191,11 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	if err := CleanupPartialsTTL(r.DownloadDir, DefaultPartialTTL); err != nil {
 		log.Printf("cleanup error: %v", err)
+	}
+	if n, err := (DownloadJournal{Dir: r.JournalDir}).PruneOldUnfinished(ctx, r.ClientID, time.Now().Add(-7*24*time.Hour)); err != nil {
+		log.Printf("download journal cleanup deferred: %v", err)
+	} else if n > 0 {
+		log.Printf("download journal cleanup: %d stale entries", n)
 	}
 
 	for {
@@ -128,8 +207,24 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		if r.RuntimeConfig != nil && (lastConfigRefresh.IsZero() || time.Since(lastConfigRefresh) >= 30*time.Second) {
 			if err := r.RuntimeConfig.Refresh(ctx); err != nil {
+				if api.IsRevoked(err) {
+					return ErrClientRevoked
+				}
+				if denied, suspend := authDenied(err); denied {
+					obs.Poll(false, time.Now(), err)
+					if suspend {
+						return ErrClientAuthSuspended
+					}
+					log.Printf("server rejected client authentication (%d/3); retry in %s", consecutiveAuthDenials, authRetryDelay)
+					if err := waitAfterAuthDenial(); err != nil {
+						return err
+					}
+					continue
+				}
 				log.Printf("runtime config refresh failed: %v", err)
 			} else {
+				// A successful config read is not proof that a denied job
+				// lease has recovered. Only successful leasing resets it.
 				lastConfigRefresh = time.Now()
 			}
 		}
@@ -141,6 +236,16 @@ func (r *Runner) Run(ctx context.Context) error {
 			if api.IsRevoked(err) {
 				return ErrClientRevoked
 			}
+			if denied, suspend := authDenied(err); denied {
+				if suspend {
+					return ErrClientAuthSuspended
+				}
+				log.Printf("server rejected client authentication (%d/3); retry in %s", consecutiveAuthDenials, authRetryDelay)
+				if err := waitAfterAuthDenial(); err != nil {
+					return err
+				}
+				continue
+			}
 			d := bo.Next()
 			log.Printf("lease error: %v (sleep %s)", err, d)
 			select {
@@ -151,6 +256,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			continue
 		}
 		bo.Reset()
+		consecutiveAuthDenials = 0
 		obs.Poll(true, time.Now(), nil)
 
 		if resp.Job == nil {
@@ -182,6 +288,21 @@ func (r *Runner) Run(ctx context.Context) error {
 			continue
 		}
 
+		// IRC command jobs require v2; explicit TLS policies additionally require v3.
+		method := job.Payload.Download.Instruction.DownloadMethod
+		if method == "irc_command" && job.Payload.SchemaVersion != 2 && job.Payload.SchemaVersion != 3 {
+			if err := r.completeWithRetry(ctx, job, "FAILED", "irc_command_requires_schema_v2_or_v3", nil); err == ErrClientRevoked {
+				return ErrClientRevoked
+			}
+			continue
+		}
+		policy := job.Payload.Download.Instruction.IRC
+		if policy != nil && (policy.TLSVerification == "pinned" || policy.TLSVerification == "unverified") && job.Payload.SchemaVersion != 3 {
+			if err := r.completeWithRetry(ctx, job, "FAILED", "irc_tls_policy_requires_schema_v3", nil); err == ErrClientRevoked {
+				return ErrClientRevoked
+			}
+			continue
+		}
 		parsed, err := download.ParseDownloadInstruction(job.Payload.Download.Instruction, job.Payload.Download.DownloadPath)
 		if err != nil {
 			log.Printf("invalid download instruction for job=%s: %v", job.JobID, err)
@@ -197,16 +318,62 @@ func (r *Runner) Run(ctx context.Context) error {
 			dedupeKey = strings.TrimSpace(job.Payload.Dedupe.DedupeKey)
 		}
 
-		// IMPORTANT: Do NOT auto-create subfolders from title/series.
-		// If output.dir is empty, write directly into download_base_path.
-		targetDir := r.DownloadDir
-		if strings.TrimSpace(parsed.Output.Dir) != "" {
-			targetDir = filepath.Join(r.DownloadDir, strings.TrimSpace(parsed.Output.Dir))
+		// The server owns output naming, but paths must not escape the user's
+		// chosen download folder, including through symlinks.
+		finalPath, pathErr := safeDownloadPath(r.DownloadDir, parsed.Output.Dir, parsed.Output.FilenameVideo)
+		if pathErr != nil {
+			if err := r.completeWithRetry(ctx, job, "FAILED", pathErr.Error(), nil); err == ErrClientRevoked {
+				return ErrClientRevoked
+			}
+			continue
 		}
-
-		filename := strings.TrimSpace(parsed.Output.FilenameVideo)
-		finalPath := filepath.Join(targetDir, filename)
 		displayPath := download.RelativeOutputPath(parsed.Output)
+		fingerprint, err := instructionFingerprint(job.Payload.Download.Instruction)
+		if err != nil {
+			if err := r.completeWithRetry(ctx, job, "FAILED", "invalid_instruction_fingerprint", nil); err == ErrClientRevoked {
+				return ErrClientRevoked
+			}
+			continue
+		}
+		journal := DownloadJournal{Dir: r.JournalDir}
+		// Reuse the exact path of an interrupted attempt. A NEW job must be
+		// free to download again even if the old file still exists.
+		if prior, found, err := journal.Load(r.ClientID, job.JobID); err != nil {
+			log.Printf("journal load failed: %v", err)
+			if e := r.completeWithRetry(ctx, job, "RETRYABLE_ERROR", "download_journal_read_failed", nil); e == ErrClientRevoked {
+				return e
+			}
+			continue
+		} else if found {
+			finalPath = prior.TargetPath
+		} else {
+			path, err := chooseNewJobOutput(finalPath, job.JobID)
+			if err != nil {
+				if e := r.completeWithRetry(ctx, job, "RETRYABLE_ERROR", "download_output_selection_failed", nil); e == ErrClientRevoked {
+					return e
+				}
+				continue
+			}
+			finalPath = path
+		}
+		// Record the server-issued attempt before any transfer/dedupe work.
+		// Never retry an IRC transfer without a new lease from the server.
+		// Only an explicit server-issued automatic fallback may rebind an
+		// unfinished download receipt; completed receipts remain immutable.
+		sourceSelection := job.Payload.IRCSourceSelection
+		allowSourceFallback := sourceSelection != nil && sourceSelection.Mode == "auto" &&
+			len(sourceSelection.TriedSourceIDs) >= 2 &&
+			sourceSelection.TriedSourceIDs[len(sourceSelection.TriedSourceIDs)-1] == job.Payload.Download.Instruction.CandidateID
+		if err := journal.BeginAttempt(r.ClientID, job.JobID, fingerprint, finalPath, job.Lease.AttemptID, allowSourceFallback); err != nil {
+			log.Printf("download history start failed job=%s: %v", job.JobID, err)
+			if errors.Is(err, os.ErrPermission) {
+				obs.Error(err)
+			}
+			if e := r.completeWithRetry(ctx, job, "RETRYABLE_ERROR", "download_journal_start_failed", nil); e == ErrClientRevoked {
+				return ErrClientRevoked
+			}
+			continue
+		}
 
 		// 1) Dedupe claim (optional) — MUST happen before local exists-check
 		if dedupeKey != "" {
@@ -269,32 +436,60 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 		}
 
-		// 2) Local idempotency: if file already exists => SUCCESS (EXISTS)
-		// Now the server has a claim and can mark it succeeded on complete.
-		if _, err := os.Stat(finalPath); err == nil {
-			log.Printf("download exists: %s", displayPath)
-			if err := r.completeWithRetry(ctx, job, "SUCCESS", "", map[string]any{
-				"reason":     "EXISTS",
-				"file_path":  finalPath,
-				"dedupe_key": dedupeKey,
-			}); err == ErrClientRevoked {
+		// Never infer success merely from the filename. A matching durable
+		// receipt proves this specific job completed locally on a prior attempt.
+		receipt, seen, err := journal.Load(r.ClientID, job.JobID)
+		if err != nil {
+			if err := r.completeWithRetry(ctx, job, "RETRYABLE_ERROR", "download_journal_read_failed", nil); err == ErrClientRevoked {
+				return ErrClientRevoked
+			}
+			log.Printf("download journal read failed job=%s: %v", job.JobID, err)
+			continue
+		}
+		if seen {
+			verified, verifyErr := journal.VerifyCompleted(ctx, receipt, fingerprint, finalPath)
+			if verifyErr != nil {
+				log.Printf("download journal mismatch job=%s: %v", job.JobID, verifyErr)
+				if err := r.completeWithRetry(ctx, job, "FAILED", verifyErr.Error(), nil); err == ErrClientRevoked {
+					return ErrClientRevoked
+				}
+				continue
+			}
+			if verified {
+				r.enqueueArchive(job, finalPath, receipt.SHA256)
+				log.Printf("download recovered from journal: %s", displayPath)
+				if err := r.completeWithRetry(ctx, job, "SUCCESS", "", map[string]any{
+					"reason": "LOCAL_RECEIPT", "file_path": finalPath, "bytes": receipt.Bytes, "dedupe_key": dedupeKey,
+				}); err == ErrClientRevoked {
+					return ErrClientRevoked
+				}
+				continue
+			}
+		}
+		if _, err := os.Lstat(finalPath); err == nil {
+			// A file with no durable completion receipt may be unrelated or
+			// left over from a crash. Preserve it and let the user decide.
+			log.Printf("download target already exists without verified receipt: %s", displayPath)
+			if err := r.completeWithRetry(ctx, job, "FAILED", "existing_file_unverified", nil); err == ErrClientRevoked {
 				return ErrClientRevoked
 			}
 			continue
+		} else if !os.IsNotExist(err) {
+			if err := r.completeWithRetry(ctx, job, "RETRYABLE_ERROR", "download_target_stat_failed", nil); err == ErrClientRevoked {
+				return ErrClientRevoked
+			}
+			continue
+		}
+		// A completed transfer is checkpointed before the server is told SUCCESS.
+		err = r.downloadWithHeartbeat(ctx, job, parsed, finalPath, displayPath, dedupeKey, journal, fingerprint)
+		if err == ErrClientRevoked {
+			return ErrClientRevoked
 		}
 
-		// 3) Download (with heartbeat)
-		err = r.downloadWithHeartbeat(ctx, job, parsed, finalPath, displayPath, dedupeKey)
-		if err != nil {
-			if err == ErrClientRevoked {
-				return ErrClientRevoked
-			}
-			continue
-		}
 	}
 }
 
-func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, inst download.ParsedInstruction, finalPath, displayPath, dedupeKey string) error {
+func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, inst download.ParsedInstruction, finalPath, displayPath, dedupeKey string, journal DownloadJournal, fingerprint string) error {
 	obs := r.Observer
 	if obs == nil {
 		obs = observe.NopObserver{}
@@ -309,6 +504,7 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 	ticker := time.NewTicker(cfg.HeartbeatInterval())
 	defer ticker.Stop()
 
+	var verifying atomic.Bool
 	var (
 		res   *download.Result
 		prog  = download.NewProgress(inst.ExpectedSize)
@@ -378,17 +574,31 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				r.ircMu.Unlock()
 			}
 
+			// An unauthenticated TLS transport must never carry IRC passwords.
+			if inst.IRC.TLSVerification == "unverified" {
+				if nsEnabled || saslEnabled || autoRegister || nsPass != "" || saslPass != "" {
+					dlErr = errors.New("irc_tls_unverified_credentials_not_allowed")
+					return
+				}
+			}
 			prog.Expected = 0
 			res, prog, dlErr = download.DownloadXDCCToFile(jobCtx, download.XDCCOptions{
 				Nick:              ircNick,
 				Host:              inst.IRC.Host,
 				Port:              inst.IRC.Port,
 				TLS:               inst.IRC.TLS,
+				TLSVerification:   inst.IRC.TLSVerification,
+				TLSSPKIPinSHA256:  inst.IRC.TLSSPKIPinSHA256,
 				Network:           inst.IRC.Network,
 				JoinChannels:      inst.IRC.PrerequisiteChannels,
 				Channel:           inst.IRC.Channel,
 				Bot:               inst.IRC.Bot,
 				Package:           inst.IRC.Package,
+				DownloadMethod:    inst.IRC.DownloadMethod,
+				SourceID:          inst.IRC.SourceID,
+				CommandTargetKind: inst.IRC.CommandTargetKind,
+				CommandTarget:     inst.IRC.CommandTarget,
+				DownloadCommand:   inst.IRC.DownloadCommand,
 				ExpectedFilename:  inst.IRC.Filename,
 				Username:          ircUser,
 				Realname:          ircReal,
@@ -462,6 +672,29 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 		default:
 			dlErr = errors.New("unsupported_mode: " + inst.Mode)
 		}
+		if dlErr == nil && res != nil {
+			// File bytes have landed; keep heartbeat active while verifying
+			// and writing the durable completion receipt.
+			verifying.Store(true)
+			size, digest, err := hashLocalFile(jobCtx, finalPath)
+			if err == nil && (inst.Mode == "single" || inst.Mode == "") && inst.ExpectedSize > 0 && size != inst.ExpectedSize {
+				err = fmt.Errorf("download_size_mismatch: got=%d expected=%d", size, inst.ExpectedSize)
+			}
+			if err == nil && size != res.Bytes {
+				err = fmt.Errorf("download_size_mismatch: received=%d actual=%d", res.Bytes, size)
+			}
+			if err == nil {
+				err = journal.MarkTransferred(r.ClientID, job.JobID, fingerprint, finalPath, size, digest)
+				if err != nil {
+					err = fmt.Errorf("download_journal_write_failed: %w", err)
+				} else {
+					r.enqueueArchive(job, finalPath, digest)
+				}
+			}
+			if err != nil {
+				dlErr = err
+			}
+		}
 	}()
 
 	// Heartbeat progress state.
@@ -533,16 +766,52 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 					}
 					obs.DownloadFinished(displayPath, statusText)
 					obs.JobCleared()
-					if err := r.completeWithRetry(ctx, job, "RETRYABLE_ERROR", errorText, map[string]any{
+					// The transfer has stopped and its .part file is closed. Report
+					// with an independent, bounded context: ctx was already
+					// canceled by Ctrl+C / Pause and cannot carry HTTP requests.
+					reportCtx, stopReport := context.WithTimeout(context.Background(), 6*time.Second)
+					reportErr := r.completeWithRetry(reportCtx, job, "RETRYABLE_ERROR", errorText, map[string]any{
 						"dedupe_key": dedupeKey,
 						"reason":     strings.ToUpper(errorText),
+					})
+					stopReport()
+					if reportErr != nil {
+						log.Printf("graceful job release unconfirmed job=%s: %v", job.JobID, reportErr)
+						if reportErr == ErrClientRevoked {
+							return ErrClientRevoked
+						}
+					} else {
+						log.Printf("graceful job release acknowledged job=%s reason=%s", job.JobID, errorText)
+					}
+					return dlErr
+				}
+
+				obs.Error(dlErr)
+
+				if errors.Is(dlErr, download.ErrDCCOfferTimeout) {
+					if err := r.completeWithRetry(ctx, job, "FAILED", "irc_dcc_offer_timeout", map[string]any{
+						"reason": "IRC_DCC_OFFER_TIMEOUT", "network": inst.IRC.Host,
+						"channel": inst.IRC.Channel, "bot": inst.IRC.Bot,
+						"dedupe_key": dedupeKey,
 					}); err == ErrClientRevoked {
 						return ErrClientRevoked
 					}
 					return dlErr
 				}
 
-				obs.Error(dlErr)
+				if errors.Is(dlErr, download.ErrDCCPrivateAddress) || errors.Is(dlErr, download.ErrDCCConnectFailed) {
+					reason := "DCC_CONNECT_FAILED"
+					if errors.Is(dlErr, download.ErrDCCPrivateAddress) {
+						reason = "DCC_PRIVATE_ADDRESS_REJECTED"
+					}
+					if err := r.completeWithRetry(ctx, job, "FAILED", strings.ToLower(reason), map[string]any{
+						"reason": reason, "network": inst.IRC.Host, "channel": inst.IRC.Channel,
+						"bot": inst.IRC.Bot, "dedupe_key": dedupeKey,
+					}); err == ErrClientRevoked {
+						return ErrClientRevoked
+					}
+					return dlErr
+				}
 
 				var gline *download.IRCGLineError
 				if errors.As(dlErr, &gline) {
@@ -757,7 +1026,11 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				}
 				lastPct = pct
 
-				p = &api.ProgressInfo{Phase: "downloading", Pct: pct}
+				phase := "downloading"
+				if verifying.Load() {
+					phase = "verifying"
+				}
+				p = &api.ProgressInfo{Phase: phase, Pct: pct}
 				bytesDone := cur
 				p.BytesDone = &bytesDone
 				if exp > 0 {
@@ -848,6 +1121,31 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				return serverStopErr
 			}
 
+			// A user pause is not a cancellation. Keep .part and resume
+			// metadata untouched and let the server hold the paused job.
+			if code == 409 && apiErr != nil && apiErr.Error == "job_paused" {
+				serverStopStatus = observe.StatusDownloadPaused
+				serverStopErr = errors.New("job_paused")
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(15 * time.Second):
+					log.Printf("download pause timeout: %s", displayPath)
+					// Never report a completed pause while the file handle is open.
+					return serverStopErr
+				}
+				log.Printf("download paused: %s", displayPath)
+				obs.DownloadFinished(displayPath, observe.StatusDownloadPaused)
+				obs.JobCleared()
+				// Context is still alive; only the download's jobCtx was canceled.
+				if err := r.completeWithRetry(ctx, job, "PAUSED", "job_paused", map[string]any{
+					"dedupe_key": dedupeKey, "reason": "PAUSED_BY_USER",
+				}); err != nil {
+					log.Printf("pause acknowledgement unconfirmed job=%s: %v", job.JobID, err)
+				}
+				return serverStopErr
+			}
+
 			// Other server-side "stop working" signals
 			if code == 404 && apiErr != nil && apiErr.Error == "attempt_not_found" {
 				serverStopStatus = observe.StatusDownloadCanceled
@@ -890,8 +1188,85 @@ func (r *Runner) complete(ctx context.Context, job *api.LeasedJob, status, errSt
 		return ErrClientRevoked
 	}
 	if code == 409 {
-		log.Printf("complete 409 (late complete), job lost: %s", job.JobID)
-		return nil
+		log.Printf("complete 409 (late complete), lease lost: %s", job.JobID)
+		return errLeaseLost
 	}
+	return err
+}
+
+// enqueueArchive runs independently of download completion: a failed local
+// extraction is NEVER reported as a failed server download.
+func (r *Runner) enqueueArchive(job *api.LeasedJob, source, digest string) {
+	plan := job.Payload.ArchiveProcessing
+	if plan == nil || !plan.Enabled || !plan.Validate() || !archive.Supported(source) {
+		return
+	}
+	q := r.archiveQueue
+	if q == nil && r.ArchiveQueueDir != "" {
+		q = &archive.Queue{Dir: r.ArchiveQueueDir, OnlyPlanned: true}
+	}
+	if q == nil {
+		log.Printf("archive extraction not queued: archive_queue_dir_missing")
+		return
+	}
+	if err := q.EnqueuePlanned(r.ClientID, job.JobID, source, digest, archive.Policy{Layout: plan.Layout, DeleteOriginal: plan.DeleteOriginal}, plan.NestedDepth); err != nil {
+		log.Printf("archive enqueue failed job=%s: %v (download remains completed)", job.JobID, err)
+	} else {
+		log.Printf("archive extraction queued: %s", source)
+	}
+}
+
+func (r *Runner) runArchiveQueue(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		processed, err := r.archiveQueue.ProcessOnePolicy(ctx, r.ClientID, archive.Limits{}, 0, archive.Policy{Layout: "separate"})
+		if err != nil && ctx.Err() == nil {
+			log.Printf("archive post-processing failed: %v (see local archive history)", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+		if processed {
+			if items, err := r.archiveQueue.History(r.ClientID, 100); err == nil {
+				journal := DownloadJournal{Dir: r.JournalDir}
+				for _, it := range items {
+					if it.Status == "completed" && !it.CleanupPending && it.StagingDir == "" {
+						_, _ = journal.ForgetAcknowledgedSuccess(r.ClientID, it.JobID, true)
+					}
+				}
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *Runner) pruneReceiptIfSettled(jobID string, plan *api.ArchiveProcessing) error {
+	ready := plan == nil || !plan.Enabled
+	if plan != nil && plan.Enabled {
+		if receipt, exists, err := (DownloadJournal{Dir: r.JournalDir}).Load(r.ClientID, jobID); err == nil && exists && !archive.Supported(receipt.TargetPath) {
+			ready = true
+		}
+	}
+	if plan != nil && plan.Enabled && !ready {
+		if r.archiveQueue != nil {
+			readyFlag, err := r.archiveQueue.FinishedForJob(r.ClientID, jobID)
+			if err != nil {
+				return err
+			}
+			ready = readyFlag
+		}
+	}
+	_, err := (DownloadJournal{Dir: r.JournalDir}).ForgetAcknowledgedSuccess(r.ClientID, jobID, ready)
 	return err
 }

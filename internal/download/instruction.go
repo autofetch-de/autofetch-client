@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
 )
@@ -29,13 +31,20 @@ type InstructionOutput struct {
 }
 
 type IRCInstruction struct {
-	Host     string
-	Port     int
-	TLS      bool
-	Channel  string
-	Bot      string
-	Package  int
-	Filename string
+	Host              string
+	Port              int
+	TLS               bool
+	TLSVerification   string
+	TLSSPKIPinSHA256  string
+	Channel           string
+	Bot               string
+	Package           int
+	Filename          string
+	DownloadMethod    string
+	SourceID          string
+	CommandTargetKind string
+	CommandTarget     string
+	DownloadCommand   string
 
 	// Legacy fallback
 	Network string
@@ -82,6 +91,9 @@ func ParseDownloadInstruction(inst api.DownloadInstruction, legacyDownloadPath *
 
 	switch mode {
 	case "single":
+		if inst.DownloadMethod != "" {
+			return ParsedInstruction{}, fmt.Errorf("invalid http download_method")
+		}
 		if parsed.VideoURL == "" {
 			return ParsedInstruction{}, fmt.Errorf("missing instruction.video_url")
 		}
@@ -126,8 +138,8 @@ func BuildIRCXDCCPlan(inst api.DownloadInstruction, legacyDownloadPath *string) 
 	network := strings.TrimSpace(ircInfo.Network)
 	channel := strings.TrimSpace(ircInfo.Channel)
 	bot := strings.TrimSpace(ircInfo.Bot)
-	filename := strings.TrimSpace(ircInfo.Filename)
-	if filename == "" {
+	filename := ircInfo.Filename
+	if strings.TrimSpace(filename) == "" {
 		filename = out.FilenameVideo
 	}
 
@@ -138,9 +150,44 @@ func BuildIRCXDCCPlan(inst api.DownloadInstruction, legacyDownloadPath *string) 
 		return nil, fmt.Errorf("missing irc.bot")
 	}
 
-	pkg, err := parseRequiredPackage(ircInfo.Package)
-	if err != nil {
+	if err := validateIRCTLSPolicy(ircInfo.TLS, ircInfo.TLSVerification, ircInfo.TLSSPKIPinSHA256); err != nil {
 		return nil, err
+	}
+	method := strings.TrimSpace(inst.DownloadMethod)
+	if method == "" {
+		method = "xdcc_numeric"
+	}
+	var pkg int
+	if method == "xdcc_numeric" {
+		var err error
+		pkg, err = parseRequiredPackage(ircInfo.Package)
+		if err != nil {
+			return nil, err
+		}
+	} else if method == "irc_command" {
+		if ircInfo.Package != nil {
+			return nil, fmt.Errorf("irc_command cannot carry pack number")
+		}
+		if err := validateIRCCommandSource(inst.SourceID, host, port, channel, bot,
+			filename, ircInfo.CommandTargetKind, ircInfo.CommandTarget, ircInfo.DownloadCommand); err != nil {
+			return nil, err
+		}
+		if err := validateCommandOutput(out); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, fmt.Errorf("unsupported irc download_method: %s", method)
+	}
+
+	// Prerequisite channel names are server-supplied for both legacy numeric
+	// XDCC and text-command downloads. Never permit IRC command injection.
+	if len(ircInfo.PrerequisiteChannels) > 12 {
+		return nil, fmt.Errorf("too many prerequisite channels")
+	}
+	for _, ch := range ircInfo.PrerequisiteChannels {
+		if !validIRCChannel(ch) {
+			return nil, fmt.Errorf("invalid prerequisite channel")
+		}
 	}
 
 	if host != "" {
@@ -175,15 +222,80 @@ func BuildIRCXDCCPlan(inst api.DownloadInstruction, legacyDownloadPath *string) 
 			Host:                 host,
 			Port:                 port,
 			TLS:                  ircInfo.TLS,
+			TLSVerification:      ircInfo.TLSVerification,
+			TLSSPKIPinSHA256:     ircInfo.TLSSPKIPinSHA256,
 			Channel:              channel,
 			Bot:                  bot,
 			Package:              pkg,
 			Filename:             filename,
+			DownloadMethod:       method,
+			SourceID:             strings.TrimSpace(inst.SourceID),
+			CommandTargetKind:    ircInfo.CommandTargetKind,
+			CommandTarget:        ircInfo.CommandTarget,
+			DownloadCommand:      ircInfo.DownloadCommand,
 			Network:              network,
 			PrerequisiteChannels: joinChannels,
 		},
 		Output: out,
 	}, nil
+}
+
+var sourceUUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$`)
+var ircBotNick = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_\[\]{}|` + "`" + `^\-]{0,29}$`)
+
+func hasIRCControls(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0
+}
+func validIRCChannel(ch string) bool {
+	return strings.HasPrefix(ch, "#") && len(ch) <= 81 && !hasIRCControls(ch) && !strings.ContainsAny(ch, " ,")
+}
+
+// The server owns the filename, but it cannot write outside the user's chosen
+// download directory, including when a Windows-shaped path is sent to a Unix client.
+func validateCommandOutput(out InstructionOutput) error {
+	name := out.FilenameVideo
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") || hasIRCControls(name) ||
+		strings.Contains(name, ":") {
+		return fmt.Errorf("unsafe irc_command output filename")
+	}
+	path := strings.ReplaceAll(out.Dir, "\\", "/")
+	if strings.HasPrefix(path, "/") || strings.Contains(path, ":") || hasIRCControls(path) {
+		return fmt.Errorf("unsafe irc_command output directory")
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == ".." {
+			return fmt.Errorf("unsafe irc_command output directory")
+		}
+	}
+	return nil
+}
+
+// validateIRCCommandSource admits only the exact !Bot <listed filename>
+// grammar validated by the server packlist importer. No general IRC scripting.
+func validateIRCCommandSource(source, host string, port int, channel, bot, filename, kind, target, command string) error {
+	if !sourceUUID.MatchString(source) || host == "" || port <= 0 || port > 65535 ||
+		strings.ContainsAny(host, "\r\n \t") || !ircBotNick.MatchString(bot) ||
+		!validIRCChannel(channel) {
+		return fmt.Errorf("invalid irc_command source")
+	}
+	if filename == "" || len(filename) > 255 || !utf8.ValidString(filename) ||
+		hasIRCControls(filename) || strings.ContainsAny(filename, "/\\") || filename == "." || filename == ".." ||
+		strings.TrimSpace(filename) != filename && (!strings.HasPrefix(filename, " ") || strings.TrimSpace(filename[1:]) != filename[1:]) {
+		return fmt.Errorf("invalid irc_command filename")
+	}
+	if len(command) > 512 || !utf8.ValidString(command) || hasIRCControls(command) {
+		return fmt.Errorf("invalid irc_command command")
+	}
+	space := strings.IndexByte(command, ' ')
+	if space < 2 || !strings.HasPrefix(command, "!") || !strings.EqualFold(command[1:space], bot) ||
+		command[space+1:] != filename {
+		return fmt.Errorf("irc_command must match selected bot and filename")
+	}
+	if kind != "channel" || !strings.EqualFold(target, channel) {
+		// Current OmenServe/FW imports only support channel-targeted commands.
+		return fmt.Errorf("unsupported irc_command target")
+	}
+	return nil
 }
 
 func parseRequiredPackage(v any) (int, error) {

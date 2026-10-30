@@ -13,7 +13,13 @@ import (
 const DefaultPartialTTL = 7 * 24 * time.Hour
 
 type partMeta struct {
-	URL string `json:"url"`
+	URL           string `json:"url"`
+	Kind          string `json:"kind"`
+	Version       int    `json:"version"`
+	SourceSHA256  string `json:"source_sha256"`
+	ExpectedBytes int64  `json:"expected_bytes"`
+	Checkpoint    int64  `json:"checkpoint_bytes"`
+	SHA256        string `json:"checkpoint_sha256"`
 }
 
 // CleanupPartialsTTL keeps recent partials (for resume) and removes old/invalid ones.
@@ -78,8 +84,14 @@ func CleanupPartialsTTL(baseDir string, ttl time.Duration) error {
 			metaOK := false
 			if b, err := os.ReadFile(metaPath); err == nil {
 				var m partMeta
-				if json.Unmarshal(b, &m) == nil && strings.TrimSpace(m.URL) != "" {
-					metaOK = true
+				if json.Unmarshal(b, &m) == nil {
+					// Preserve bounded DCC checkpoints across a client restart;
+					// the downloader independently verifies the entire prefix.
+					metaOK = strings.TrimSpace(m.URL) != "" ||
+						(m.Kind == "dcc_resume" && m.Version == 1 &&
+							len(m.SourceSHA256) == 64 && m.ExpectedBytes > 0 &&
+							m.Checkpoint >= 0 && m.Checkpoint <= m.ExpectedBytes &&
+							(m.Checkpoint == 0 || len(m.SHA256) == 64))
 				}
 			}
 

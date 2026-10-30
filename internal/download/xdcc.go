@@ -3,15 +3,18 @@ package download
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +32,44 @@ var ErrReverseDCCTimeout = errors.New("reverse_dcc_timeout")
 var ErrReverseDCCDisabled = errors.New("reverse_dcc_disabled")
 var ErrXDCCTransferIncomplete = errors.New("xdcc_transfer_incomplete")
 var ErrIRCGLine = errors.New("irc_gline")
+var ErrDCCPrivateAddress = errors.New("dcc_private_address_rejected")
+var ErrDCCConnectFailed = errors.New("dcc_connect_failed")
+var ErrDCCOfferTimeout = errors.New("irc_dcc_offer_timeout")
+
+// Reject non-public DCC destination IPs before sending RESUME or dialing.
+// DCC offers are supplied by remote IRC users, not trusted configuration.
+func validateDCCDestination(offer *dccOffer) error {
+	if offer == nil {
+		return fmt.Errorf("dcc_missing_offer")
+	}
+	if offer.Port == 0 && offer.Token != "" {
+		return nil
+	} // reverse DCC
+	ip, ok := netip.AddrFromSlice(offer.IP)
+	if !ok || offer.Port < 1 || offer.Port > 65535 {
+		return ErrDCCPrivateAddress
+	}
+	ip = ip.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() ||
+		(isBlockedSpecialDCCIP(ip)) {
+		return fmt.Errorf("%w: %s", ErrDCCPrivateAddress, ip)
+	}
+	return nil
+}
+
+func isBlockedSpecialDCCIP(ip netip.Addr) bool {
+	// netip.IsGlobalUnicast includes shared, benchmark and documentation ranges.
+	for _, cidr := range []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+		"224.0.0.0/4", "240.0.0.0/4", "2001:db8::/32",
+	} {
+		if netip.MustParsePrefix(cidr).Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
 
 func closeConnOnContext(ctx context.Context, conn net.Conn) func() {
 	done := make(chan struct{})
@@ -138,16 +179,23 @@ func OfferedFilename(err error) string {
 }
 
 type XDCCOptions struct {
-	Nick    string
-	Host    string
-	Port    int
-	TLS     bool
-	Network string
+	Nick             string
+	Host             string
+	Port             int
+	TLS              bool
+	TLSVerification  string
+	TLSSPKIPinSHA256 string
+	Network          string
 
-	JoinChannels []string
-	Channel      string
-	Bot          string
-	Package      int
+	JoinChannels      []string
+	Channel           string
+	Bot               string
+	Package           int
+	DownloadMethod    string
+	SourceID          string
+	CommandTargetKind string
+	CommandTarget     string
+	DownloadCommand   string
 
 	ExpectedFilename string
 	Username         string
@@ -171,6 +219,8 @@ type XDCCOptions struct {
 	IRCHandshakeTimeout time.Duration
 	OfferTimeout        time.Duration
 	DCCConnectTimeout   time.Duration
+	AllowNonPublicDCC   bool // Explicit trusted LAN/test only; never set by server jobs.
+	ResumeTimeout       time.Duration
 
 	// Optional reverse/passive DCC settings. These can also be supplied via
 	// AUTOFETCH_DCC_PUBLIC_IP, AUTOFETCH_DCC_LISTEN_HOST,
@@ -199,7 +249,9 @@ func DownloadXDCCToFile(ctx context.Context, opt XDCCOptions, destPath string, b
 	opt.Network = strings.TrimSpace(opt.Network)
 	opt.Channel = strings.TrimSpace(opt.Channel)
 	opt.Bot = strings.TrimSpace(opt.Bot)
-	opt.ExpectedFilename = strings.TrimSpace(opt.ExpectedFilename)
+	if opt.DownloadMethod != "irc_command" {
+		opt.ExpectedFilename = strings.TrimSpace(opt.ExpectedFilename)
+	}
 	opt.RegistrationEmail = strings.TrimSpace(opt.RegistrationEmail)
 	opt.RegistrationPassword = strings.TrimSpace(opt.RegistrationPassword)
 	if len(opt.JoinChannels) == 0 && opt.Channel != "" {
@@ -221,14 +273,29 @@ func DownloadXDCCToFile(ctx context.Context, opt XDCCOptions, destPath string, b
 		opt.JoinChannels[i] = internalirc.NormalizeChannel(strings.TrimSpace(opt.JoinChannels[i]))
 	}
 	opt.Channel = internalirc.NormalizeChannel(opt.Channel)
-	if (opt.Host == "" && opt.Network == "") || opt.Bot == "" || opt.ExpectedFilename == "" || opt.Package <= 0 {
+	if opt.DownloadMethod == "" {
+		opt.DownloadMethod = "xdcc_numeric"
+	}
+	if (opt.Host == "" && opt.Network == "") || opt.Bot == "" || opt.ExpectedFilename == "" {
 		return nil, prog, fmt.Errorf("xdcc_missing_fields")
+	}
+	if opt.DownloadMethod == "xdcc_numeric" {
+		if opt.Package <= 0 {
+			return nil, prog, fmt.Errorf("xdcc_missing_fields")
+		}
+	} else if opt.DownloadMethod == "irc_command" {
+		if err := validateIRCCommandSource(opt.SourceID, opt.Host, opt.Port,
+			opt.Channel, opt.Bot, opt.ExpectedFilename, opt.CommandTargetKind, opt.CommandTarget, opt.DownloadCommand); err != nil {
+			return nil, prog, err
+		}
+	} else {
+		return nil, prog, fmt.Errorf("unsupported irc download_method")
 	}
 	if opt.IRCHandshakeTimeout <= 0 {
 		opt.IRCHandshakeTimeout = 20 * time.Second
 	}
 	if opt.OfferTimeout <= 0 {
-		opt.OfferTimeout = 60 * time.Second
+		opt.OfferTimeout = 120 * time.Second
 	}
 	if opt.DCCConnectTimeout <= 0 {
 		opt.DCCConnectTimeout = 20 * time.Second
@@ -277,16 +344,11 @@ func DownloadXDCCToFile(ctx context.Context, opt XDCCOptions, destPath string, b
 			downloaded = p.Downloaded.Load()
 			expected = p.Expected
 		}
-		log.Printf(
-			"XDCC session failed: host=%s channel=%s bot=%s package=%d downloaded=%d expected=%d err=%v",
-			opt.Host,
-			opt.Channel,
-			opt.Bot,
-			opt.Package,
-			downloaded,
-			expected,
-			err,
-		)
+		if opt.DownloadMethod == "irc_command" {
+			log.Printf("IRC command session failed: host=%s channel=%s bot=%s downloaded=%d expected=%d err=%v", opt.Host, opt.Channel, opt.Bot, downloaded, expected, err)
+		} else {
+			log.Printf("XDCC session failed: host=%s channel=%s bot=%s package=%d downloaded=%d expected=%d err=%v", opt.Host, opt.Channel, opt.Bot, opt.Package, downloaded, expected, err)
+		}
 		return nil, p, err
 	}
 	return res, p, nil
@@ -551,7 +613,13 @@ func readIRCLineForPhase(ctx context.Context, conn net.Conn, rw *bufio.ReadWrite
 			}
 			return "", fmt.Errorf("irc_connection_closed_during_%s: %w", phase, err)
 		}
+		if phase == "waiting_for_offer" && strings.Contains(err.Error(), "nickserv_handshake_timeout") {
+			return "", ErrDCCOfferTimeout
+		}
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			if phase == "waiting_for_offer" {
+				return "", ErrDCCOfferTimeout
+			}
 			return "", fmt.Errorf("irc_%s_timeout", phase)
 		}
 		return "", fmt.Errorf("irc_%s_failed: %w", phase, err)
@@ -803,17 +871,42 @@ func writeIRCPrivmsg(rw *bufio.ReadWriter, target, msg string) error {
 	return writeIRCLine(rw, fmt.Sprintf("PRIVMSG %s :%s", target, msg))
 }
 
+// ircRequestLine preserves numeric XDCC behavior while restricting imported
+// file-list commands to their exactly selected destination and request.
+func ircRequestLine(opt XDCCOptions) string {
+	if opt.DownloadMethod == "irc_command" {
+		return "PRIVMSG " + opt.CommandTarget + " :" + opt.DownloadCommand
+	}
+	return fmt.Sprintf("PRIVMSG %s :XDCC SEND %d", opt.Bot, opt.Package)
+}
+
+// A DCC offer for irc_command may only come from the selected bot and must
+// be addressed to the actual nick negotiated with the IRC server.
+func isSelectedDCCOffer(line, selectedBot, currentNick string) bool {
+	parts := strings.SplitN(line, " ", 4)
+	return len(parts) == 4 && strings.HasPrefix(parts[0], ":") &&
+		strings.EqualFold(ircPrefixNick(strings.TrimPrefix(parts[0], ":")), selectedBot) &&
+		strings.EqualFold(parts[1], "PRIVMSG") && strings.EqualFold(parts[2], currentNick)
+}
+
 func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytesPerSec int64, prog *Progress) (*Result, *Progress, error) {
 	host, port, useTLS, err := resolveIRCAddress(opt)
 	if err != nil {
 		return nil, prog, err
 	}
-	log.Printf("IRC job: host=%s port=%d tls=%t channel=%s bot=%s package=%d", host, port, useTLS, opt.Channel, opt.Bot, opt.Package)
+	if opt.DownloadMethod == "irc_command" {
+		log.Printf("IRC job: host=%s port=%d tls=%t channel=%s bot=%s method=irc_command", host, port, useTLS, opt.Channel, opt.Bot)
+	} else {
+		log.Printf("IRC job: host=%s port=%d tls=%t channel=%s bot=%s method=xdcc_numeric package=%d", host, port, useTLS, opt.Channel, opt.Bot, opt.Package)
+	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	dialer := &net.Dialer{Timeout: opt.IRCHandshakeTimeout}
 	var conn net.Conn
 	if useTLS {
-		c, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: host})
+		if opt.TLSVerification == "unverified" {
+			log.Printf("IRC TLS warning: certificate identity verification disabled by explicit network policy for %s:%d", host, port)
+		}
+		c, err := tls.DialWithDialer(dialer, "tcp", addr, ircTLSConfigForPolicy(host, opt.TLSVerification, opt.TLSSPKIPinSHA256))
 		if err != nil {
 			return nil, prog, err
 		}
@@ -929,22 +1022,30 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 	if err := waitForChannelJoins(ctx, conn, rw, writeLine, currentNick, joinChannels, opt.IRCHandshakeTimeout, opt.Bot); err != nil {
 		return nil, prog, err
 	}
-	if err := writeLine(fmt.Sprintf("PRIVMSG %s :XDCC SEND %d", opt.Bot, opt.Package)); err != nil {
+	if err := writeLine(ircRequestLine(opt)); err != nil {
 		return nil, prog, fmt.Errorf("xdcc_request_send_failed: %w", err)
 	}
-	log.Printf("XDCC request sent: bot=%s package=%d", opt.Bot, opt.Package)
+	log.Printf("IRC download request sent: bot=%s method=%s target=%s package=%d", opt.Bot, opt.DownloadMethod, opt.CommandTarget, opt.Package)
 	offerTimeout := opt.OfferTimeout
 	if offerTimeout <= 0 {
-		offerTimeout = 90 * time.Second
+		offerTimeout = 120 * time.Second
 	}
-	offerDeadline := time.Now().Add(offerTimeout)
+	wait := newIRCOfferWait(time.Now(), offerTimeout)
+	offerDeadline := wait.deadline
+	log.Printf("XDCC request sent: awaiting DCC offer (timeout=%s, state=%s)", offerTimeout, wait.state())
 	lastOfferMessage := ""
 	for {
-		if time.Now().After(offerDeadline) {
-			return nil, prog, fmt.Errorf("xdcc_offer_timeout")
+		if !time.Now().Before(offerDeadline) {
+			log.Printf("XDCC offer timeout: bot=%s state=%s waited=%s", opt.Bot, wait.state(), time.Since(wait.started).Round(time.Second))
+			_ = cancelRejectedXDCCOffer(opt, writeLine)
+			return nil, prog, ErrDCCOfferTimeout
 		}
 		line, err := readIRCLineForPhase(ctx, conn, rw, offerDeadline, "waiting_for_offer", &lastOfferMessage)
 		if err != nil {
+			if errors.Is(err, ErrDCCOfferTimeout) {
+				log.Printf("XDCC offer timeout: bot=%s state=%s waited=%s", opt.Bot, wait.state(), time.Since(wait.started).Round(time.Second))
+				_ = cancelRejectedXDCCOffer(opt, writeLine)
+			}
 			return nil, prog, err
 		}
 		logRelevantIRCLine("waiting_for_offer", line, opt.Bot)
@@ -970,9 +1071,10 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 			if strings.TrimSpace(opt.NickServPassword) != "" && !opt.SASLEnabled {
 				log.Printf("bot requires identified nick on %s; retrying nickserv identify", host)
 				if err := performNickServIdentifyHandshake(ctx, conn, rw, host, opt.NickServPassword, &offerDeadline); err == nil {
-					offerDeadline = time.Now().Add(opt.OfferTimeout)
+					wait = newIRCOfferWait(time.Now(), offerTimeout)
+					offerDeadline = wait.deadline
 					log.Printf("retrying xdcc request after successful identification on %s", host)
-					_ = writeLine(fmt.Sprintf("PRIVMSG %s :XDCC SEND %d", opt.Bot, opt.Package))
+					_ = writeLine(ircRequestLine(opt))
 					continue
 				}
 			}
@@ -989,9 +1091,10 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 				}
 				autoRegisterSucceeded = true
 				markAutoRegistered(opt, currentNick, autoRegisteredPassword, &autoRegisteredPersisted, &autoRegisterSucceeded, host)
-				offerDeadline = time.Now().Add(opt.OfferTimeout)
+				wait = newIRCOfferWait(time.Now(), offerTimeout)
+				offerDeadline = wait.deadline
 				log.Printf("retrying xdcc request after successful identification on %s", host)
-				_ = writeLine(fmt.Sprintf("PRIVMSG %s :XDCC SEND %d", opt.Bot, opt.Package))
+				_ = writeLine(ircRequestLine(opt))
 				continue
 			}
 			if autoRegisterTried {
@@ -1012,23 +1115,22 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 				return nil, prog, ctx.Err()
 			case <-time.After(wait):
 			}
-			_ = writeLine(fmt.Sprintf("PRIVMSG %s :XDCC SEND %d", opt.Bot, opt.Package))
+			_ = writeLine(ircRequestLine(opt))
 			continue
 		}
-		if strings.Contains(lower, "queued") || strings.Contains(lower, "you are in queue") || strings.Contains(lower, "all slots are full") || strings.Contains(lower, "try again later") {
-			wait := parseWaitDuration(lower, 45*time.Second)
-			if next := time.Now().Add(wait + 15*time.Second); next.After(offerDeadline) {
-				offerDeadline = next
-			}
-			select {
-			case <-ctx.Done():
-				return nil, prog, ctx.Err()
-			case <-time.After(wait):
-			}
-			_ = writeLine(fmt.Sprintf("PRIVMSG %s :XDCC SEND %d", opt.Bot, opt.Package))
+		if state := wait.observe(line, opt, currentNick); state != "" {
+			offerDeadline = wait.deadline
+			log.Printf("XDCC request %s: bot=%s waiting for DCC offer (deadline in %s)",
+				state, opt.Bot, time.Until(offerDeadline).Round(time.Second))
+			// A queued bot delivers the offer asynchronously. Never resend a
+			// request merely because it reports a queue position.
 			continue
 		}
 		if !strings.Contains(line, "DCC SEND") {
+			continue
+		}
+		if !isSelectedDCCOffer(line, opt.Bot, currentNick) {
+			// Ignore other bots' unsolicited DCC offers instead of accepting them.
 			continue
 		}
 		offer, err := parseDCCSendLine(line)
@@ -1037,12 +1139,28 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 		}
 		offered := strings.TrimSpace(offer.Filename)
 		expected := strings.TrimSpace(opt.ExpectedFilename)
+		if opt.DownloadMethod == "irc_command" {
+			expected = opt.ExpectedFilename
+		}
 		match, reason := filenameMatchDetailed(expected, offered)
+		if opt.DownloadMethod == "irc_command" {
+			match, reason = expected == offer.Filename, "exact"
+		}
 		if !match {
 			return nil, nil, &XDCCFilenameMismatchError{Expected: expected, Offered: offered}
 		}
 		if reason != "exact" {
 			log.Printf("XDCC filename accepted via fuzzy match: expected=%q offered=%q rule=%s", expected, offered, reason)
+		}
+		if !opt.AllowNonPublicDCC {
+			if err := validateDCCDestination(offer); err != nil {
+				// This bot still considers the DCC slot pending. Cancel only
+				// our own numeric XDCC offer (never another bot's offer).
+				if cancelErr := cancelRejectedXDCCOffer(opt, writeLine); cancelErr != nil {
+					log.Printf("XDCC CANCEL not sent to %s: %v", opt.Bot, cancelErr)
+				}
+				return nil, prog, err
+			}
 		}
 		if offer.Port == 0 && strings.TrimSpace(offer.Token) != "" && !opt.ReverseDCCEnabled {
 			log.Printf("reverse dcc offer from %s on %s rejected: reverse dcc is disabled", opt.Bot, host)
@@ -1058,12 +1176,24 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 			}
 			prog.Downloaded.Store(0)
 		}
-		res, err := dccDownload(ctx, rw, conn, opt, offer, destPath, prog, opt.DCCConnectTimeout, bytesPerSec)
+		res, err := dccDownload(ctx, rw, conn, opt, currentNick, offer, destPath, prog, opt.DCCConnectTimeout, bytesPerSec)
 		if err != nil {
 			return nil, prog, err
 		}
 		return res, prog, nil
 	}
+}
+
+// Best effort only: not all bots support XDCC CANCEL. Never address a
+// different bot or send a numeric XDCC command for irc_command transfers.
+func cancelRejectedXDCCOffer(opt XDCCOptions, writeLine func(string) error) error {
+	if opt.DownloadMethod != "xdcc_numeric" && opt.DownloadMethod != "" {
+		return nil
+	}
+	if strings.TrimSpace(opt.Bot) == "" {
+		return nil
+	}
+	return writeLine(fmt.Sprintf("PRIVMSG %s :XDCC CANCEL", opt.Bot))
 }
 
 type dccOffer struct {
@@ -1386,96 +1516,215 @@ func minInt(a, b int) int {
 	return b
 }
 
-func dccDownload(ctx context.Context, rw *bufio.ReadWriter, ircConn net.Conn, opt XDCCOptions, offer *dccOffer, destPath string, prog *Progress, timeout time.Duration, bytesPerSec int64) (*Result, error) {
-	var conn net.Conn
-	var err error
+func dccDownload(ctx context.Context, rw *bufio.ReadWriter, ircConn net.Conn, opt XDCCOptions, nick string, offer *dccOffer, destPath string, prog *Progress, timeout time.Duration, bytesPerSec int64) (*Result, error) {
+	offset, meta, err := prepareDCCPartial(destPath, opt, offer)
+	if err != nil {
+		return nil, err
+	}
+	// A finished but not yet renamed .part can be recovered from its durable
+	// digest without initiating a second DCC connection.
+	if offer.Size > 0 && offset == offer.Size {
+		if _, err := os.Lstat(destPath); err == nil {
+			return nil, fmt.Errorf("download_target_exists")
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err := os.Rename(destPath+".part", destPath); err != nil {
+			return nil, err
+		}
+		_ = os.Remove(dccMetaPath(destPath))
+		prog.Downloaded.Store(offset)
+		return &Result{FilePath: destPath, Bytes: offset}, nil
+	}
+	// Classic active DCC supports RESUME/ACCEPT. Passive/reverse DCC does not
+	// currently have a tested interoperable resume negotiation.
+	if offset > 0 && offer.Port > 0 && strings.TrimSpace(offer.Token) == "" {
+		ok, err := negotiateDCCResume(ctx, ircConn, rw, opt.Bot, nick, offer, offset, opt.ResumeTimeout)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			log.Printf("DCC resume not acknowledged; restarting safely from zero bot=%s", opt.Bot)
+			if err := restartDCCFromZero(destPath); err != nil {
+				return nil, err
+			}
+			offset = 0
+			meta.Checkpoint, meta.SHA256 = 0, ""
+		} else {
+			log.Printf("DCC resume accepted bot=%s offset=%d", opt.Bot, offset)
+		}
+	} else if offset > 0 {
+		// A passive DCC transfer may restart, but its partial cannot be used.
+		if err := restartDCCFromZero(destPath); err != nil {
+			return nil, err
+		}
+		offset = 0
+		meta.Checkpoint, meta.SHA256 = 0, ""
+	}
+	var dccConn net.Conn
 	if offer.Port == 0 && strings.TrimSpace(offer.Token) != "" {
 		if !opt.ReverseDCCEnabled {
 			return nil, reverseDCCDisabledError()
 		}
-		conn, err = acceptReverseDCC(ctx, rw, ircConn, opt, offer, maxDuration(timeout, 90*time.Second))
-		if err != nil {
-			return nil, err
-		}
+		dccConn, err = acceptReverseDCC(ctx, rw, ircConn, opt, offer, maxDuration(timeout, 90*time.Second))
 	} else {
-		addr := net.JoinHostPort(offer.IP.String(), strconv.Itoa(offer.Port))
 		dialer := &net.Dialer{Timeout: timeout}
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-		if err != nil {
-			return nil, err
+		dccConn, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(offer.IP.String(), strconv.Itoa(offer.Port)))
+		if err != nil && ctx.Err() == nil {
+			return nil, fmt.Errorf("%w: %v", ErrDCCConnectFailed, err)
 		}
 	}
-	defer conn.Close()
-	stopConnCancel := closeConnOnContext(ctx, conn)
-	defer stopConnCancel()
-	return receiveDCCFile(ctx, conn, destPath, prog, bytesPerSec)
-}
-
-func receiveDCCFile(ctx context.Context, conn net.Conn, destPath string, prog *Progress, bytesPerSec int64) (*Result, error) {
-	partPath := destPath + ".part"
-	f, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = f.Close()
+	defer dccConn.Close()
+	stop := closeConnOnContext(ctx, dccConn)
+	defer stop()
+	// Keep IRC joined while DCC runs: the download network may enforce idle
+	// membership in prerequisite channels and will periodically send PINGs.
+	// Keep responding to IRC PINGs during every DCC transfer. If explicit
+	// prerequisite channels are configured, losing that IRC session must
+	// also stop the transfer, instead of silently losing channel membership.
+	var requiredChannels []string
+	for _, channel := range opt.JoinChannels {
+		if !strings.EqualFold(strings.TrimSpace(channel), strings.TrimSpace(opt.Channel)) {
+			requiredChannels = append(requiredChannels, channel)
 		}
-	}()
+	}
+	if len(requiredChannels) > 0 {
+		requiredChannels = append(requiredChannels, opt.Channel)
+	}
+	stopIRCWatch := startDCCIRCWatch(ctx, ircConn, rw, dccConn, nick, requiredChannels)
+	res, receiveErr := receiveDCCStream(ctx, dccConn, destPath, prog, bytesPerSec, offset, &meta)
+	controlErr := stopIRCWatch()
+	// A fully received and verified file stays successful even if IRC closed
+	// concurrently with the final DCC byte.
+	if receiveErr == nil && res != nil {
+		return res, nil
+	}
+	if controlErr != nil {
+		return nil, controlErr
+	}
+	return res, receiveErr
+}
 
-	buf := make([]byte, 32*1024)
-	var written int64
-	reader := NewRateLimitedReader(conn, bytesPerSec)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+// Kept for existing transfer tests and callers using a fresh, unjournaled
+// stream. Production downloads use receiveDCCStream with source-bound meta.
+func receiveDCCFile(ctx context.Context, conn net.Conn, destPath string, prog *Progress, bytesPerSec int64) (*Result, error) {
+	return receiveDCCStream(ctx, conn, destPath, prog, bytesPerSec, 0, nil)
+}
+
+func receiveDCCStream(ctx context.Context, conn net.Conn, destPath string, prog *Progress, bytesPerSec int64, offset int64, meta *dccPartialMeta) (*Result, error) {
+	partPath := destPath + ".part"
+	var f *os.File
+	var err error
+	if offset > 0 {
+		f, err = os.OpenFile(partPath, os.O_RDWR, 0)
+	} else if meta != nil {
+		// The sidecar is written first; it binds new content to the source.
+		// If a .part already exists, never silently truncate it.
+		if err := writeDCCMeta(dccMetaPath(destPath), *meta); err != nil {
+			return nil, err
 		}
-		n, rerr := reader.Read(buf)
+		f, err = os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	} else {
+		f, err = os.OpenFile(partPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	hasher := sha256.New()
+	if offset > 0 {
+		st, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if !st.Mode().IsRegular() || st.Size() != offset {
+			return nil, fmt.Errorf("dcc_partial_changed")
+		}
+		if _, err := io.CopyN(hasher, f, offset); err != nil {
+			return nil, err
+		}
+		if meta != nil && hex.EncodeToString(hasher.Sum(nil)) != meta.SHA256 {
+			return nil, fmt.Errorf("dcc_partial_changed_during_resume")
+		}
+	}
+	var written int64 = offset
+	prog.Downloaded.Store(offset)
+	reader := NewRateLimitedReader(conn, bytesPerSec)
+	checkpoint := func() error {
+		if meta == nil {
+			return nil
+		}
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		meta.Checkpoint = written
+		meta.SHA256 = hex.EncodeToString(hasher.Sum(nil))
+		return writeDCCMeta(dccMetaPath(destPath), *meta)
+	}
+	buf := make([]byte, 32*1024)
+	lastCheckpoint := offset
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = checkpoint()
+			return nil, err
+		}
+		n, readErr := reader.Read(buf)
 		if n > 0 {
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				return nil, werr
+			if prog.Expected > 0 && written+int64(n) > prog.Expected {
+				return nil, fmt.Errorf("dcc_received_more_than_announced")
 			}
+			if _, err := f.Write(buf[:n]); err != nil {
+				return nil, err
+			}
+			_, _ = hasher.Write(buf[:n])
 			written += int64(n)
 			prog.Downloaded.Store(written)
-
 			ack := make([]byte, 4)
 			binary.BigEndian.PutUint32(ack, uint32(written))
-			nAck, ackErr := conn.Write(ack)
-			if ackErr != nil {
-				return nil, fmt.Errorf("xdcc_ack_write_failed: %w", ackErr)
+			if _, err := conn.Write(ack); err != nil {
+				_ = checkpoint()
+				return nil, fmt.Errorf("xdcc_ack_write_failed: %w", err)
 			}
-			if nAck != len(ack) {
-				return nil, fmt.Errorf("xdcc_ack_write_failed: %w", io.ErrShortWrite)
+			if written-lastCheckpoint >= dccCheckpointInterval {
+				if err := checkpoint(); err != nil {
+					return nil, err
+				}
+				lastCheckpoint = written
 			}
 		}
-		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				if prog.Expected > 0 && written != prog.Expected {
-					return nil, &XDCCTransferIncompleteError{Received: written, Expected: prog.Expected}
-				}
-				break
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				_ = checkpoint()
+				return nil, readErr
 			}
-			return nil, rerr
+			break
 		}
 	}
-
 	if prog.Expected > 0 && written != prog.Expected {
+		_ = checkpoint()
 		return nil, &XDCCTransferIncompleteError{Received: written, Expected: prog.Expected}
 	}
-	if err := f.Sync(); err != nil {
+	if written == 0 {
+		return nil, fmt.Errorf("dcc_empty_transfer")
+	}
+	if err := checkpoint(); err != nil {
 		return nil, err
 	}
 	if err := f.Close(); err != nil {
 		return nil, err
 	}
-	closed = true
+	if _, err := os.Lstat(destPath); err == nil {
+		return nil, fmt.Errorf("download_target_exists")
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	if err := os.Rename(partPath, destPath); err != nil {
 		return nil, err
 	}
-	_ = os.Remove(destPath + ".part.meta.json")
+	_ = os.Remove(dccMetaPath(destPath))
 	return &Result{FilePath: destPath, Bytes: written}, nil
 }
 

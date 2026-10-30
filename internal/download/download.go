@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -58,7 +60,7 @@ func DownloadToFile(ctx context.Context, httpClient *http.Client, url, destPath 
 	if st, err := os.Stat(partPath); err == nil && st.Mode().IsRegular() {
 		if b, err := os.ReadFile(metaPath); err == nil {
 			var m partMeta
-			if json.Unmarshal(b, &m) == nil && strings.TrimSpace(m.URL) == url {
+			if json.Unmarshal(b, &m) == nil && strings.TrimSpace(m.URL) == url && m.ExpectedSize == expectedSize {
 				resumeOffset = st.Size()
 				// keep meta fields if present
 				if m.ETag != "" {
@@ -84,9 +86,18 @@ func DownloadToFile(ctx context.Context, httpClient *http.Client, url, destPath 
 		}
 	}
 
+	// A range response is not safe to append without a validator for the
+	// original representation. Legacy .part files without validators are
+	// restarted rather than silently mixing different remote objects.
+	if resumeOffset > 0 && (meta.ETag == "" || strings.HasPrefix(meta.ETag, "W/")) && meta.LastModified == "" {
+		resumeOffset = 0
+		meta.ETag = ""
+		meta.LastModified = ""
+	}
+
 	// Write meta (or refresh)
 	if b, err := json.Marshal(meta); err == nil {
-		_ = os.WriteFile(metaPath, b, 0o644)
+		_ = os.WriteFile(metaPath, b, 0o600)
 	}
 
 	// Build request
@@ -96,6 +107,11 @@ func DownloadToFile(ctx context.Context, httpClient *http.Client, url, destPath 
 	}
 	if resumeOffset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeOffset))
+		if meta.ETag != "" && !strings.HasPrefix(meta.ETag, "W/") {
+			req.Header.Set("If-Range", meta.ETag)
+		} else if meta.LastModified != "" {
+			req.Header.Set("If-Range", meta.LastModified)
+		}
 	}
 
 	resp, err := httpClient.Do(req)
@@ -104,63 +120,43 @@ func DownloadToFile(ctx context.Context, httpClient *http.Client, url, destPath 
 	}
 	defer resp.Body.Close()
 
-	// Capture validators if present
-	if et := resp.Header.Get("ETag"); et != "" && meta.ETag == "" {
-		meta.ETag = et
-	}
-	if lm := resp.Header.Get("Last-Modified"); lm != "" && meta.LastModified == "" {
-		meta.LastModified = lm
-	}
-	if b, err := json.Marshal(meta); err == nil {
-		_ = os.WriteFile(metaPath, b, 0o644)
-	}
-
 	if resp.StatusCode == 404 {
 		return nil, nil, fmt.Errorf("http_404")
 	}
-
-	// Resume logic:
-	// - 206: append ok (but verify Content-Range begins where we expect)
-	// - 200 when we asked for Range => server ignored Range, restart
-	// - 416 => probably already complete; finalize
-	if resumeOffset > 0 && resp.StatusCode == 200 {
-		_ = os.Remove(partPath)
-		_ = os.Remove(metaPath)
-		return DownloadToFile(ctx, httpClient, url, destPath, expectedSize, bytesPerSec, prog)
+	if resp.StatusCode == 416 {
+		// 416 says only that a range cannot be served; it is NOT evidence
+		// that the existing partial contains the complete expected file.
+		return nil, nil, fmt.Errorf("http_416_unverified_partial")
 	}
-
-	if resumeOffset > 0 && resp.StatusCode == 206 {
-		// Verify Content-Range: "bytes <start>-<end>/<total>"
-		cr := resp.Header.Get("Content-Range")
-		// Minimal check: must contain "bytes <resumeOffset>-"
-		want := fmt.Sprintf("bytes %d-", resumeOffset)
-		if cr != "" && !strings.HasPrefix(strings.ToLower(cr), strings.ToLower(want)) {
-			// Server responded with a different range than requested -> restart safely.
-			_ = os.Remove(partPath)
-			_ = os.Remove(metaPath)
-			return DownloadToFile(ctx, httpClient, url, destPath, expectedSize, bytesPerSec, prog)
-		}
-	}
-
-	if resp.StatusCode == 416 && resumeOffset > 0 {
-		// Treat as complete-ish: rename to final
-		if err := os.Rename(partPath, destPath); err != nil {
-			return nil, nil, err
-		}
-		_ = os.Remove(metaPath)
-
-		st, _ := os.Stat(destPath)
-		var sz int64
-		if st != nil {
-			sz = st.Size()
-		}
-		prog := NewProgress(expectedSize)
-		prog.Downloaded.Store(sz)
-		return &Result{FilePath: destPath, Bytes: sz}, prog, nil
-	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, nil, fmt.Errorf("http_%d", resp.StatusCode)
+	}
+
+	if resumeOffset > 0 && resp.StatusCode == 200 {
+		// The server ignored Range or If-Range detected a changed object.
+		// Use this fresh 200 response rather than recursively requesting.
+		resumeOffset = 0
+		meta.ETag = ""
+		meta.LastModified = ""
+	}
+	var rangeEnd, rangeTotal int64
+	if resp.StatusCode == 206 {
+		if resumeOffset == 0 {
+			return nil, nil, fmt.Errorf("http_unexpected_partial_response")
+		}
+		rangeEnd, rangeTotal, err = validateContentRange(resp.Header.Get("Content-Range"), resumeOffset, expectedSize)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if et := resp.Header.Get("ETag"); et != "" {
+		meta.ETag = et
+	}
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		meta.LastModified = lm
+	}
+	if b, err := json.Marshal(meta); err == nil {
+		_ = os.WriteFile(metaPath, b, 0600)
 	}
 
 	// Open .part for write/append
@@ -195,16 +191,41 @@ func DownloadToFile(ctx context.Context, httpClient *http.Client, url, destPath 
 	if err != nil {
 		return nil, prog, err
 	}
+	if err := f.Sync(); err != nil {
+		return nil, prog, err
+	}
 	if err := f.Close(); err != nil {
 		return nil, prog, err
 	}
 
-	// Finalize
+	total := resumeOffset + n
+	if resp.StatusCode == 206 && (total != rangeTotal || total != rangeEnd+1) {
+		return nil, prog, fmt.Errorf("http_incomplete_partial_response")
+	}
+	if expectedSize > 0 && total != expectedSize {
+		return nil, prog, fmt.Errorf("http_size_mismatch: received=%d expected=%d", total, expectedSize)
+	}
+	// Finalize only a complete transfer.
 	if err := os.Rename(partPath, destPath); err != nil {
 		return nil, prog, err
 	}
 	_ = os.Remove(metaPath)
 
-	total := resumeOffset + n
 	return &Result{FilePath: destPath, Bytes: total}, prog, nil
+}
+
+var contentRangePattern = regexp.MustCompile(`^bytes ([0-9]+)-([0-9]+)/([0-9]+)$`)
+
+func validateContentRange(value string, offset, expectedSize int64) (int64, int64, error) {
+	parts := contentRangePattern.FindStringSubmatch(strings.TrimSpace(value))
+	if len(parts) != 4 {
+		return 0, 0, fmt.Errorf("http_invalid_content_range")
+	}
+	start, err1 := strconv.ParseInt(parts[1], 10, 64)
+	end, err2 := strconv.ParseInt(parts[2], 10, 64)
+	total, err3 := strconv.ParseInt(parts[3], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || start != offset || end < start || end >= total || (expectedSize > 0 && total != expectedSize) {
+		return 0, 0, fmt.Errorf("http_invalid_content_range")
+	}
+	return end, total, nil
 }

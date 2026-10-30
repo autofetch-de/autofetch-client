@@ -12,6 +12,7 @@ type RegisterStartRequest struct {
 	Variant     string `json:"variant,omitempty"`
 	BuildCommit string `json:"build_commit,omitempty"`
 	BuildDate   string `json:"build_date,omitempty"`
+	ClientProtocolInfo
 }
 
 type RegisterStartResponse struct {
@@ -44,6 +45,7 @@ type ClientMetadata struct {
 type LeaseRequest struct {
 	ClientID string `json:"client_id"`
 	ClientMetadata
+	ClientProtocolInfo
 }
 
 type LeaseResponse struct {
@@ -65,12 +67,39 @@ type Lease struct {
 
 // --- Payload (nur Felder, die wir brauchen) ---
 
+// ArchiveProcessing is a server-authored immutable per-job instruction.
+// Missing or invalid instructions are download-only, never delete originals.
+type ArchiveProcessing struct {
+	Enabled        bool   `json:"enabled"`
+	Layout         string `json:"layout"`
+	DeleteOriginal bool   `json:"delete_original"`
+	NestedDepth    int    `json:"nested_depth"`
+}
+
+func (p ArchiveProcessing) Validate() bool {
+	if p.Layout != "separate" && p.Layout != "same" {
+		return false
+	}
+	if p.NestedDepth < 0 || p.NestedDepth > 3 {
+		return false
+	}
+	return p.Enabled || (!p.DeleteOriginal && p.NestedDepth == 0)
+}
+
 type JobPayload struct {
-	Query           *QueryInfo       `json:"query,omitempty"`
-	Dedupe          *DedupeInfo      `json:"dedupe,omitempty"`
-	Download        *DownloadPayload `json:"download,omitempty"`
-	EffectiveSearch *EffectiveSearch `json:"effective_search,omitempty"`
-	Candidates      []Candidate      `json:"candidates,omitempty"`
+	SchemaVersion      int                 `json:"schema_version,omitempty"`
+	IRCSourceSelection *IRCSourceSelection `json:"irc_source_selection,omitempty"`
+	ArchiveProcessing  *ArchiveProcessing  `json:"archive_processing,omitempty"`
+	Query              *QueryInfo          `json:"query,omitempty"`
+	Dedupe             *DedupeInfo         `json:"dedupe,omitempty"`
+	Download           *DownloadPayload    `json:"download,omitempty"`
+	EffectiveSearch    *EffectiveSearch    `json:"effective_search,omitempty"`
+	Candidates         []Candidate         `json:"candidates,omitempty"`
+}
+
+type IRCSourceSelection struct {
+	Mode           string   `json:"mode"`
+	TriedSourceIDs []string `json:"tried_source_ids"`
 }
 
 type QueryInfo struct {
@@ -89,10 +118,12 @@ type DownloadPayload struct {
 }
 
 type DownloadInstruction struct {
-	Mode     string      `json:"mode"` // "single" | "xdcc"
-	Quality  QualityInfo `json:"quality"`
-	Provider string      `json:"provider,omitempty"`
-	GroupKey string      `json:"group_key,omitempty"`
+	DownloadMethod string      `json:"download_method,omitempty"` // xdcc_numeric (default) | irc_command
+	SourceID       string      `json:"source_id,omitempty"`       // authoritative selected source (pack UUID)
+	Mode           string      `json:"mode"`                      // "single" | "xdcc"
+	Quality        QualityInfo `json:"quality"`
+	Provider       string      `json:"provider,omitempty"`
+	GroupKey       string      `json:"group_key,omitempty"`
 
 	// HTTP download fields (mode: "single")
 	VideoURL     string `json:"video_url,omitempty"`
@@ -114,12 +145,17 @@ type IRCXDCCInfo struct {
 	Host                 string   `json:"host,omitempty"`
 	Port                 int      `json:"port,omitempty"`
 	TLS                  bool     `json:"tls,omitempty"`
+	TLSVerification      string   `json:"tls_verification,omitempty"`
+	TLSSPKIPinSHA256     string   `json:"tls_spki_pin_sha256,omitempty"`
 	Network              string   `json:"network,omitempty"` // legacy fallback
 	Channel              string   `json:"channel,omitempty"`
 	Bot                  string   `json:"bot,omitempty"`
 	Package              any      `json:"package,omitempty"` // server may send number or string
 	Filename             string   `json:"filename,omitempty"`
 	PrerequisiteChannels []string `json:"prerequisite_channels,omitempty"`
+	CommandTargetKind    string   `json:"command_target_kind,omitempty"`
+	CommandTarget        string   `json:"command_target,omitempty"`
+	DownloadCommand      string   `json:"download_command,omitempty"`
 }
 
 type InstructionOutput struct {
@@ -198,6 +234,7 @@ type HeartbeatResponse struct {
 }
 
 type APIErrorResponse struct {
+	Message    string     `json:"message,omitempty"`
 	Error      string     `json:"error"`
 	CanceledAt *time.Time `json:"canceled_at,omitempty"`
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 	gort "runtime"
 	"strings"
@@ -11,11 +13,13 @@ import (
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/api"
+	"github.com/autofetch-de/autofetch-client/internal/archive"
 	"github.com/autofetch-de/autofetch-client/internal/buildinfo"
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 	"github.com/autofetch-de/autofetch-client/internal/localization"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
+	"github.com/autofetch-de/autofetch-client/internal/update"
 	"github.com/autofetch-de/autofetch-client/internal/worker"
 )
 
@@ -52,18 +56,20 @@ func (s *stopSignal) Mode() stopMode {
 }
 
 type Service struct {
-	mu         sync.Mutex
-	cfg        *config.Config
-	buildInfo  buildinfo.Info
-	api        *api.Client
-	state      *observe.State
-	localizer  *localization.Localizer
-	factory    RunnerFactory
-	runCtx     context.Context
-	cancelRun  context.CancelFunc
-	stopSignal *stopSignal
-	running    bool
-	pairing    bool
+	mu           sync.Mutex
+	cfg          *config.Config
+	buildInfo    buildinfo.Info
+	api          *api.Client
+	state        *observe.State
+	localizer    *localization.Localizer
+	factory      RunnerFactory
+	runCtx       context.Context
+	cancelRun    context.CancelFunc
+	stopSignal   *stopSignal
+	runnerDone   chan struct{}
+	running      bool
+	updateStatus update.Status
+	pairing      bool
 }
 
 func NewService(cfg *config.Config, info buildinfo.Info, apiClient *api.Client, state *observe.State, factory RunnerFactory) *Service {
@@ -71,6 +77,48 @@ func NewService(cfg *config.Config, info buildinfo.Info, apiClient *api.Client, 
 }
 
 func (s *Service) BuildInfo() buildinfo.Info { return s.buildInfo }
+
+func (s *Service) UpdateStatus() update.Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateStatus
+}
+
+// RunUpdateChecker is independent of the download worker. A failed check never
+// interrupts leasing, pairing or transfers. It reports only published releases.
+func (s *Service) RunUpdateChecker(ctx context.Context) {
+	if s == nil || s.cfg == nil {
+		return
+	}
+	check := func() {
+		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		status, err := update.Check(checkCtx, s.cfg.ServerBaseURL, s.buildInfo, nil)
+		if err != nil {
+			return
+		} // Offline/missing release API: keep running normally.
+		s.mu.Lock()
+		wasAvailable := s.updateStatus.Available
+		previousLatest := s.updateStatus.Latest
+		s.updateStatus = status
+		s.mu.Unlock()
+		if status.Available && (!wasAvailable || previousLatest != status.Latest) {
+			log.Printf("client update available: installed=%s published=%s download=%s", status.Installed, status.Latest, status.DownloadURL)
+		}
+	}
+	check()
+	ticker := time.NewTicker(update.CheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			check()
+		}
+	}
+}
+
 func (s *Service) Localizer() *localization.Localizer {
 	if s == nil || s.localizer == nil {
 		return localization.New(localization.English)
@@ -83,6 +131,18 @@ func (s *Service) Start() error {
 	defer s.mu.Unlock()
 	if s.running || s.pairing {
 		return nil
+	}
+	if s.cfg.AuthPausedAt != nil {
+		return fmt.Errorf("authentication paused: invalid client credentials; re-pair required")
+	}
+	// Do not overlap a new runner with a previous one still flushing its
+	// final report and closing the DCC file/socket.
+	if s.runnerDone != nil {
+		select {
+		case <-s.runnerDone:
+		default:
+			return fmt.Errorf("client still stopping; retry start shortly")
+		}
 	}
 	if s.cfg != nil {
 		s.cfg.IRC = s.cfg.IRC.WithDefaults()
@@ -98,17 +158,36 @@ func (s *Service) Start() error {
 	s.runCtx = ctx
 	s.cancelRun = cancel
 	s.stopSignal = sig
+	done := make(chan struct{})
+	s.runnerDone = done
 	if strings.TrimSpace(s.cfg.ClientID) == "" || strings.TrimSpace(s.cfg.ClientToken) == "" {
 		s.pairing = true
-		go s.pairAndMaybeRun(ctx)
+		go func() { defer close(done); s.pairAndMaybeRun(ctx) }()
 		return nil
 	}
 	s.running = true
 	s.state.SetPaired(true)
 	s.state.SetRunning(true)
 	r := s.factory(s.state)
-	go s.run(r, ctx)
+	go func() { defer close(done); s.run(r, ctx) }()
 	return nil
+}
+
+// WaitStopped keeps the process alive briefly after SIGINT/SIGTERM so the
+// worker can close its partial file and acknowledge the released lease.
+func (s *Service) WaitStopped(ctx context.Context) error {
+	s.mu.Lock()
+	done := s.runnerDone
+	s.mu.Unlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) pairAndMaybeRun(ctx context.Context) {
@@ -129,13 +208,17 @@ func (s *Service) pairAndMaybeRun(ctx context.Context) {
 			return
 		default:
 		}
-		start, err := apiClient.RegisterStart(ctx, api.RegisterStartRequest{ClientName: s.cfg.ClientName, Platform: platform, Arch: arch, Version: s.buildInfo.Version, Variant: s.buildInfo.Variant, BuildCommit: s.buildInfo.BuildCommit, BuildDate: s.buildInfo.BuildDate})
+		start, err := apiClient.RegisterStart(ctx, api.RegisterStartRequest{ClientName: s.cfg.ClientName, Platform: platform, Arch: arch, Version: s.buildInfo.Version, Variant: s.buildInfo.Variant, BuildCommit: s.buildInfo.BuildCommit, BuildDate: s.buildInfo.BuildDate, ClientProtocolInfo: api.CurrentProtocolInfo(s.cfg.InstanceID)})
 		if err != nil {
 			s.state.PairingFailed(err)
 			s.state.Error(err)
 			return
 		}
-		s.state.StartPairing(start.PairingCode, strings.TrimRight(s.cfg.ServerBaseURL, "/")+"/clients/new", start.ExpiresAt)
+		pairingURL := strings.TrimRight(s.cfg.ServerBaseURL, "/") + "/clients/new"
+		s.state.StartPairing(start.PairingCode, pairingURL, start.ExpiresAt)
+		// A service-backed pairing flow (GUI or local Web UI) does not run the
+		// CLI pairing path. Print the same prominent code in the terminal.
+		writePairingBanner(os.Stdout, s.localizer, start.PairingCode, pairingURL)
 		pollEvery := time.Duration(start.PollAfterSeconds) * time.Second
 		if pollEvery <= 0 {
 			pollEvery = 3 * time.Second
@@ -171,6 +254,7 @@ func (s *Service) pairAndMaybeRun(ctx context.Context) {
 				s.cfg.ClientToken = res.ClientToken
 				s.cfg.PairedAt = &now
 				s.cfg.RevokedAt = nil
+				s.cfg.AuthPausedAt = nil
 				s.api.ClientID = res.ClientID
 				s.api.ClientToken = res.ClientToken
 				s.running = true
@@ -204,6 +288,19 @@ func (s *Service) pairAndMaybeRun(ctx context.Context) {
 
 func (s *Service) run(r *worker.Runner, ctx context.Context) {
 	err := r.Run(ctx)
+	if errors.Is(err, worker.ErrClientAuthSuspended) || errors.Is(err, worker.ErrClientRevoked) {
+		s.mu.Lock()
+		now := time.Now().UTC()
+		s.cfg.AuthPausedAt = &now
+		if errors.Is(err, worker.ErrClientRevoked) {
+			config.MarkRevoked(s.cfg, now)
+		}
+		if persistErr := config.Persist(*s.cfg); persistErr != nil {
+			log.Printf("authentication pause persistence failed: %v", persistErr)
+		}
+		s.mu.Unlock()
+		log.Printf("client automatically paused: server repeatedly rejected credentials; re-pair required")
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.state.Error(err)
 	}
@@ -214,6 +311,7 @@ func (s *Service) run(r *worker.Runner, ctx context.Context) {
 	s.runCtx = nil
 	s.stopSignal = nil
 	s.state.SetRunning(false)
+	s.state.SetConnected(false)
 }
 
 func (s *Service) Stop() error { return s.Pause() }
@@ -265,7 +363,12 @@ func (s *Service) StartRePair() error {
 	s.api.ClientToken = ""
 	s.state.SetPaired(false)
 	s.state.SetConnected(false)
-	go func() { _ = s.Start() }()
+	go func() {
+		waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		_ = s.WaitStopped(waitCtx)
+		_ = s.Start()
+	}()
 	return nil
 }
 func (s *Service) Snapshot() observe.Snapshot {
@@ -274,6 +377,60 @@ func (s *Service) Snapshot() observe.Snapshot {
 	}
 	return s.state.Snapshot()
 }
+
+// DownloadHistory returns the local, per-pairing record summaries. Download
+// retries remain exclusively server-leased; history is read-only.
+func (s *Service) DownloadHistory(ctx context.Context, limit int) ([]worker.DownloadHistoryItem, error) {
+	if s == nil || s.cfg == nil {
+		return nil, fmt.Errorf("service not initialized")
+	}
+	s.mu.Lock()
+	clientID := s.cfg.ClientID
+	configPath := s.cfg.ConfigPath
+	s.mu.Unlock()
+	return (worker.DownloadJournal{Dir: filepath.Join(filepath.Dir(configPath), "download-journal")}).History(ctx, clientID, limit)
+}
+
+// HideDownloadHistory hides one/all entries in the local presentation without
+// deleting durable download receipts or modifying any server-side job.
+func (s *Service) HideDownloadHistory(ctx context.Context, jobID string, all bool) error {
+	if s == nil || s.cfg == nil {
+		return fmt.Errorf("service not initialized")
+	}
+	s.mu.Lock()
+	clientID, configPath := s.cfg.ClientID, s.cfg.ConfigPath
+	s.mu.Unlock()
+	return (worker.DownloadJournal{Dir: filepath.Join(filepath.Dir(configPath), "download-journal")}).HideHistory(ctx, clientID, jobID, all)
+}
+
+// ArchiveHistory exposes extraction results separately from server downloads.
+func (s *Service) ArchiveHistory(ctx context.Context, limit int) ([]archive.Item, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil || s.cfg == nil {
+		return nil, fmt.Errorf("service not initialized")
+	}
+	s.mu.Lock()
+	clientID, configPath := s.cfg.ClientID, s.cfg.ConfigPath
+	s.mu.Unlock()
+	return (&archive.Queue{Dir: filepath.Join(filepath.Dir(configPath), "archive-queue")}).History(clientID, limit)
+}
+
+// RetryArchive requeues a local failed extraction; it never re-leases a server job.
+func (s *Service) RetryArchive(ctx context.Context, jobID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil || s.cfg == nil {
+		return fmt.Errorf("service not initialized")
+	}
+	s.mu.Lock()
+	clientID, configPath := s.cfg.ClientID, s.cfg.ConfigPath
+	s.mu.Unlock()
+	return (&archive.Queue{Dir: filepath.Join(filepath.Dir(configPath), "archive-queue")}).Retry(clientID, jobID)
+}
+
 func (s *Service) ConfigPath() string {
 	if s == nil || s.cfg == nil {
 		return ""
@@ -288,6 +445,12 @@ func (s *Service) DownloadDir() string {
 	defer s.mu.Unlock()
 	return s.cfg.DownloadDir
 }
+
+// Legacy local archive controls are intentionally no longer authoritative.
+func (s *Service) UpdateArchiveOptions(_ config.ArchiveOptions) error {
+	return fmt.Errorf("archive_settings_managed_by_server")
+}
+
 func (s *Service) IRCConfig() config.IRCConfig {
 	if s == nil || s.cfg == nil {
 		return config.IRCConfig{}

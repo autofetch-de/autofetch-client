@@ -141,6 +141,8 @@ func (l *Localizer) UserError(raw string) string {
 		return l.T("error.nickserv_handshake_timeout")
 	case strings.Contains(lower, "irc_glined") || strings.Contains(lower, "irc_gline"):
 		return l.T("error.irc_glined")
+	case strings.Contains(lower, "irc_required_channel_lost"):
+		return l.T("error.irc_required_channel_lost")
 	case strings.Contains(lower, "irc_join_rejected") || strings.Contains(lower, "irc_error_during_channel_join") || strings.Contains(lower, "irc_join_send_failed"):
 		return l.T("error.irc_join_failed")
 	case strings.Contains(lower, "irc_connection_closed") || strings.Contains(lower, "irc_connection") && strings.Contains(lower, "failed"):
