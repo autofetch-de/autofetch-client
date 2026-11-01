@@ -194,13 +194,13 @@ func (x *extractor) extractSevenZip(source string, volumes []string) error {
 		}
 		return fmt.Errorf("archive_7zip_list_failed: %w", err)
 	}
-	entries, err := parseSevenZipList(result.Bytes(), x.limits, volumeLeader(source))
+	entries, err := parseSevenZipList(result.Bytes(), x.limits, len(volumes) > 1 || volumeLeader(source))
 	if err != nil {
 		return err
 	}
 	// Solid archive members don't have trustworthy individual packed sizes,
 	// but an aggregate ratio against the complete archive is still useful.
-	// Multi-volume series are intentionally out of scope here.
+	// The full volume set is included in the compressed-size denominator.
 	var compressedBytes int64
 	for _, p := range volumes {
 		st, err := os.Lstat(p)

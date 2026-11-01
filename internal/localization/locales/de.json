@@ -233,5 +233,17 @@
   "activity.title": "Aktivitäten",
   "activity.refresh": "Aktualisieren",
   "update.available_short": "Update verfügbar:",
-  "update.download": "Neue Version herunterladen"
+  "update.download": "Neue Version herunterladen",
+  "webui.password_heading": "WebUI-Passwort",
+  "webui.password_setup_hint": "Optional: Richte hier ein Passwort für den LAN-Zugriff ein. Lässt du beide Felder leer, bleibt der bisherige passwortlose Zugriff bestehen.",
+  "webui.new_password": "Neues Passwort (optional, mindestens 12 Zeichen)",
+  "webui.repeat_password": "Neues Passwort wiederholen",
+  "webui.password_active": "Passwortschutz aktiv. Benutzername: autofetch. Passwortänderungen über das Formular sind in dieser Konfiguration nicht verfügbar.",
+  "webui.password_mismatch": "Die beiden Passwörter stimmen nicht überein.",
+  "webui.password_active_hint": "Der Passwortschutz ist aktiv. Wenn du das Passwort ändern möchtest, gib ein neues Passwort ein; andernfalls beide Felder leer lassen.",
+  "webui.leave_unchanged": "Leer lassen, um das Passwort nicht zu ändern",
+  "webui.login_heading": "Wichtig für die Anmeldung",
+  "webui.login_username": "Benutzername:",
+  "webui.login_after_save": "Sobald du ein neues Passwort speicherst, fragt der Browser bei der nächsten Anfrage nach Benutzername und Passwort.",
+  "webui.password_http_warning": "Hinweis: Die Anmeldung über HTTP ist im LAN nicht verschlüsselt. Nur im vertrauenswürdigen Netzwerk oder per SSH-Tunnel verwenden."
 }

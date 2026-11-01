@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 - 2026-11-01
+
+### Added
+
+- Unified Web UI settings form: optional password setup and change, single Save action at the bottom, prominent login username (`autofetch`), immediate HTTP Basic Auth enforcement and protected local storage.
+- A configured password takes precedence over a lingering `--webui-lan-no-password` startup flag, preventing silent re-exposure after a restart.
+- Opt-in access to the local Web UI from a single explicitly configured private LAN IP, protected by a password file (HTTP Basic Auth) or an explicitly enabled no-password mode.
+- `--webui-password-file`, `--webui-lan-no-password`, and equivalent `AUTOFETCH_WEBUI_*` environment variables; settings can also be stored in `client.json` without storing the password itself.
+- Explicit `--headless --webui=true` or `AUTOFETCH_WEBUI=true` allows local Web UI operation on headless / systemd installations. Plain `--headless` still disables the Web UI.
+
+### Fixed
+
+- Publish successfully completed DCC, XDCC, HTTP and extracted files with mode `0644` while keeping incomplete `.part`, metadata, and private archive markers at mode `0600` on Unix.
+- Extend Beta support for classic RAR multipart sets (`.rar`, `.r00`, `.r01` etc.), including contiguous-part checks, full decoder verification and nested extraction safety.
+- Skip the duplicate-case filename fixture on case-insensitive filesystems such as common macOS installations, where separate filenames cannot coexist.
+- Return local Web UI bind errors immediately, refuse wildcard/public-interface bindings and reject unauthorized LAN requests including cross-site state changes.
+- Carry forward the public v1.2.0 GitHub ARM/QEMU build verification and MIT copyright information.
+
+### Preserved
+
+- DCC RESUME/ACCEPT, including existing partial-transfer safety tests.
+- Stable published v1.2.0 release/tag and server API compatibility.
+
+## 1.2.0 - 2026-10-30
 
 ### Added
 

@@ -16,8 +16,8 @@ Every release contains two fixed-language variants built from the same source co
 Choose the language suffix when downloading a release, for example:
 
 ```text
-autofetch-gui-windows-amd64-en-v1.1.0.exe
-autofetch-headless-linux-arm64-de-v1.1.0
+autofetch-gui-windows-amd64-en-v1.2.1.exe
+autofetch-headless-linux-arm64-de-v1.2.1
 ```
 
 The language does not affect API paths, configuration keys, technical error codes or log terminology. Technical logs remain in English so support information stays consistent across both builds.
@@ -55,6 +55,38 @@ The headless build is intended for servers, NAS systems and low-power devices. R
 - macOS Apple Silicon
 
 The normal command-line client can also expose a status interface on `127.0.0.1:23324`. Use `--headless` to disable the local interface.
+
+
+## LAN access to the local Web UI (v1.2.1+)
+
+**Default:** bound only to `127.0.0.1:23324`, not available to the LAN. Plain `--headless` continues to disable the Web UI. Remote access requires binding to an **explicit private IP assigned to this client machine**; wildcard addresses such as `0.0.0.0` and public IPs are rejected.
+
+Password-protected option (recommended):
+
+```bash
+umask 077
+mkdir -p "$HOME/.config/autofetch"
+openssl rand -hex 24 > "$HOME/.config/autofetch/webui.password"
+chmod 600 "$HOME/.config/autofetch/webui.password"
+
+./autofetch-en --headless --webui=true \
+  --webui-addr=192.168.1.50:23324 \
+  --webui-password-file="$HOME/.config/autofetch/webui.password"
+```
+
+Replace `192.168.1.50` with the actual LAN address of the client host. Browse to `http://192.168.1.50:23324`, using username `autofetch` and the password stored in the file. All UI endpoints including download history and management actions require authentication.
+
+**Explicitly opt in** to unauthenticated LAN access only on a fully trusted local network:
+
+```bash
+./autofetch-en --headless --webui=true --webui-addr=192.168.1.50:23324 --webui-lan-no-password
+```
+
+**Set or change a password in the Web UI:** Open **Settings → Web UI password**. The two password fields are **optional**: leave both empty to keep the current password (or to stay in the explicitly enabled no-password LAN mode). Enter and confirm a new password, then use the single **Save** button at the bottom of the settings form. The browser login always uses **username `autofetch`** and the newly saved password; authentication changes immediately, without restarting. First-time setup writes a private `webui.password` file alongside `client.json`, with only the file path stored in JSON. Password updates atomically replace the protected file. The password takes precedence over a lingering `--webui-lan-no-password` flag after restart; remove that flag from your startup configuration regardless. **Warning:** Password submission and HTTP Basic authentication over plain HTTP are **not encrypted**. Use only on a trusted LAN or through an SSH tunnel.
+
+For systemd, set `Environment=AUTOFETCH_WEBUI=true`, `Environment=AUTOFETCH_WEBUI_ADDR=192.168.1.50:23324` and `Environment=AUTOFETCH_WEBUI_PASSWORD_FILE=/var/lib/autofetch/webui.password` (or explicitly `Environment=AUTOFETCH_WEBUI_LAN_NO_PASSWORD=true`). The password file must be readable by the service user and not by other users (mode `0600`). Only its **path** is stored in `client.json` if persisted. The equivalent CLI flags work as well.
+
+**Security:** The Web UI serves plain HTTP, **not HTTPS**. HTTP Basic Auth controls access but does **not** protect the password against network interception. Use it on a trusted LAN only; for untrusted networks, use an SSH tunnel or VPN to localhost. Never forward the Web UI port through a router or publish it on the Internet. Host/Origin restrictions do not make a compromised LAN safe.
 
 ## First start and pairing
 
@@ -96,7 +128,7 @@ The build language is not stored in the configuration. It is compiled into the s
 Install the selected headless binary under a stable local filename:
 
 ```bash
-sudo install -m 0755 autofetch-headless-linux-amd64-en-v1.1.0 /usr/local/bin/autofetch
+sudo install -m 0755 autofetch-headless-linux-amd64-en-v1.2.1 /usr/local/bin/autofetch
 ```
 
 Create `/etc/systemd/system/autofetch.service`:

@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/autofetch-de/autofetch-client/internal/filepermissions"
 )
 
 const publishIntent = ".autofetch-publish-intent.json"
@@ -214,6 +216,10 @@ func PublishSameDirectory(ctx context.Context, source, extracted string) (string
 	dest := filepath.Join(filepath.Dir(source), plan.Target)
 	root := filepath.Join(extracted, plan.Root)
 	if plan.Kind == "file" {
+		// Handle recoveries from an earlier version's private extracted file.
+		if err := filepermissions.PrepareCompletedFile(root); err != nil {
+			return "", err
+		}
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -223,6 +229,11 @@ func PublishSameDirectory(ctx context.Context, source, extracted string) (string
 			}
 		}
 	} else {
+		// The extraction has already completed. Make hardlinked content
+		// readable; destination directories remain private until verified.
+		if err := prepareReadableTree(ctx, root); err != nil {
+			return "", err
+		}
 		if fresh {
 			if err := os.Mkdir(dest, 0700); err != nil {
 				return "", fmt.Errorf("archive_destination_exists: %w", err)
@@ -249,6 +260,9 @@ func PublishSameDirectory(ctx context.Context, source, extracted string) (string
 				if err := verifyPublishPlan(ctx, root, dest, plan); err != nil {
 					return "", fmt.Errorf("archive_destination_exists")
 				}
+				if err := preparePublishedDirectories(ctx, root, dest); err != nil {
+					return "", err
+				}
 				return dest, nil
 			}
 		}
@@ -260,6 +274,11 @@ func PublishSameDirectory(ctx context.Context, source, extracted string) (string
 		return "", err
 	}
 	if plan.Kind == "directory" {
+		// All links are verified now. Open the completed directory tree
+		// to other local readers before clearing the private progress marker.
+		if err := preparePublishedDirectories(ctx, root, dest); err != nil {
+			return "", err
+		}
 		if err := os.Remove(filepath.Join(dest, publishInProgress)); err != nil {
 			return "", err
 		}

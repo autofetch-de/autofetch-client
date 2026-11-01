@@ -28,13 +28,18 @@ func Run(cfg config.Config, info buildinfo.Info) error {
 	defer stop()
 	go service.RunUpdateChecker(ctx)
 
-	if cfg.EnableWebUI && !cfg.Headless {
-		ui := webui.New(cfg.WebUIListenAddr, service.state, service, l)
+	if cfg.EnableWebUI {
+		ui, err := webui.NewWithOptions(cfg.WebUIListenAddr, service.state, service, l, webui.AccessOptions{
+			PasswordFile: cfg.WebUIPasswordFile, AllowUnauthenticatedLAN: cfg.WebUILANNoPassword,
+		})
+		if err != nil {
+			return fmt.Errorf("local ui configuration failed: %w", err)
+		}
 		if err := ui.Start(); err != nil {
 			return fmt.Errorf("local ui start failed: %w", err)
 		}
 		log.Printf("local status UI listening on %s", ui.URL())
-		if cfg.OpenBrowser {
+		if cfg.OpenBrowser && !cfg.Headless {
 			if err := webui.OpenBrowser(ui.URL()); err != nil {
 				log.Printf("could not open browser: %v", err)
 			}

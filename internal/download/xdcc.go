@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/autofetch-de/autofetch-client/internal/filepermissions"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 )
 
@@ -1529,7 +1530,7 @@ func dccDownload(ctx context.Context, rw *bufio.ReadWriter, ircConn net.Conn, op
 		} else if !os.IsNotExist(err) {
 			return nil, err
 		}
-		if err := os.Rename(destPath+".part", destPath); err != nil {
+		if err := filepermissions.PublishCompletedFile(destPath+".part", destPath); err != nil {
 			return nil, err
 		}
 		_ = os.Remove(dccMetaPath(destPath))
@@ -1721,7 +1722,7 @@ func receiveDCCStream(ctx context.Context, conn net.Conn, destPath string, prog 
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	if err := os.Rename(partPath, destPath); err != nil {
+	if err := filepermissions.PublishCompletedFile(partPath, destPath); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(dccMetaPath(destPath))

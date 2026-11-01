@@ -20,6 +20,10 @@ var sevenFirst = regexp.MustCompile(`(?i)^(.+\.7z)\.(0*1)$`)
 var rarVolume = regexp.MustCompile(`(?i)^(.+)\.part([0-9]+)\.rar$`)
 var sevenVolume = regexp.MustCompile(`(?i)^(.+\.7z)\.([0-9]+)$`)
 
+// Old-style RAR volumes follow name.rar as name.r00, name.r01, ...
+// and continue with name.s00 after name.r99.
+var classicRARVolume = regexp.MustCompile(`(?i)^(.+)\.([r-z])([0-9]{2})$`)
+
 const maxVolumeFiles = 128
 
 func volumeLeader(name string) bool {
@@ -39,6 +43,12 @@ func collectVolumes(source string) ([]string, error) {
 	case sevenFirst.MatchString(base):
 		match = sevenFirst.FindStringSubmatch(base)
 	default:
+		// A plain .rar can lead an old-style multi-volume set. Keep each
+		// sibling bound to this exact basename; never treat a standalone
+		// .r00 as a separately extractable archive.
+		if strings.EqualFold(filepath.Ext(base), ".rar") {
+			return collectClassicRARVolumes(source)
+		}
 		return []string{source}, nil
 	}
 	prefix, width := match[1], len(match[2])
@@ -85,6 +95,56 @@ func collectVolumes(source string) ([]string, error) {
 			return nil, fmt.Errorf("archive_volume_invalid")
 		}
 		result = append(result, p)
+	}
+	return result, nil
+}
+
+// collectClassicRARVolumes recognizes the legacy .rar + .r00 + .r01 ...
+// naming scheme. The archive must begin with .r00 and every subsequent
+// volume must exist in sequence. We do not infer a complete archive from
+// names alone: 7-Zip's full test must also succeed before publication.
+func collectClassicRARVolumes(source string) ([]string, error) {
+	base := filepath.Base(source)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	entries, err := os.ReadDir(filepath.Dir(source))
+	if err != nil {
+		return nil, err
+	}
+	parts := make(map[int]string)
+	for _, entry := range entries {
+		match := classicRARVolume.FindStringSubmatch(entry.Name())
+		if match == nil || !strings.EqualFold(match[1], stem) {
+			continue
+		}
+		letter := strings.ToLower(match[2])[0]
+		number, err := strconv.Atoi(match[3])
+		if err != nil {
+			return nil, fmt.Errorf("archive_volume_naming_conflict")
+		}
+		index := 1 + int(letter-'r')*100 + number
+		if index >= maxVolumeFiles {
+			return nil, fmt.Errorf("archive_volume_count_limit")
+		}
+		if _, duplicate := parts[index]; duplicate {
+			return nil, fmt.Errorf("archive_volume_duplicate")
+		}
+		parts[index] = filepath.Join(filepath.Dir(source), entry.Name())
+	}
+	if len(parts) == 0 {
+		return []string{source}, nil
+	}
+	result := make([]string, 0, len(parts)+1)
+	result = append(result, source)
+	for index := 1; index <= len(parts); index++ {
+		volume, ok := parts[index]
+		if !ok {
+			return nil, fmt.Errorf("archive_volume_missing")
+		}
+		st, err := os.Lstat(volume)
+		if err != nil || !st.Mode().IsRegular() || st.Size() == 0 {
+			return nil, fmt.Errorf("archive_volume_invalid")
+		}
+		result = append(result, volume)
 	}
 	return result, nil
 }

@@ -6,12 +6,10 @@ Manche ältere IRC-Server liefern ein TLS-Zertifikat mit passendem Common Name (
 
 Standardmäßig bleibt die volle Go-TLS-Prüfung aktiv. Ein expliziter lokaler Opt-in erlaubt ausschließlich **exakte** Hostnamen und ausschließlich Zertifikate, deren *CN genau dem aufgerufenen Host entspricht*, die **keine SAN-Erweiterung** enthalten und deren Zertifikatskette beim Betriebssystem bereits vertrauenswürdig ist. Zertifikatsgültigkeit, Server-Authentifizierungszweck und Chain of Trust werden weiterhin überprüft. Weder wird automatisch auf Plaintext gewechselt noch ein anderes Netzwerk gewählt. **Selbstsignierte/nicht vertrauenswürdige Zertifikate werden dadurch nicht akzeptiert.**
 
-Die Beispiel-Binärdatei `./autofetch-de` steht für den lokal installierten deutschsprachigen Headless-Client; bei abweichendem Installationsnamen diesen entsprechend ersetzen.
-
 Beispiel für eine begrenzte lokale Freigabe:
 
 ```bash
-AUTOFETCH_IRC_TLS_LEGACY_CN_HOSTS=irc.irchighway.net ./autofetch-de
+AUTOFETCH_IRC_TLS_LEGACY_CN_HOSTS=irc.irchighway.net ./build/autofetch-headless
 ```
 
 Mehrere Hosts sind nur durch Kommas getrennt möglich. Wildcards und IP-Adressen werden nicht als Ausnahmen akzeptiert. Bei leerer Variable ist die Ausnahme vollständig deaktiviert. Die Ausnahme gilt sowohl für ältere nummerierte XDCC-Downloads als auch für `irc_command`, aber ausschließlich beim TLS-Handshake zu diesen exakt benannten IRC-Hosts.

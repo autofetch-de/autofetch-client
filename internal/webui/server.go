@@ -3,15 +3,18 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/archive"
@@ -36,11 +39,15 @@ type service interface {
 }
 
 type Server struct {
-	state   *observe.State
-	service service
-	http    *http.Server
-	addr    string
-	l       *localization.Localizer
+	state    *observe.State
+	service  service
+	http     *http.Server
+	addr     string
+	l        *localization.Localizer
+	bindHost string
+	lan      bool
+	accessMu sync.RWMutex
+	password []byte
 }
 
 func New(addr string, state *observe.State, service service, l *localization.Localizer) *Server {
@@ -65,13 +72,37 @@ func New(addr string, state *observe.State, service service, l *localization.Loc
 	mux.HandleFunc("/api/repair", s.handleRepair)
 	mux.HandleFunc("/irc/setup", s.handleIRCSetup)
 	mux.HandleFunc("/settings", s.handleSettings)
-	s.http = &http.Server{Addr: addr, Handler: mux}
+	mux.HandleFunc("/settings/webui-password", s.handleSetWebUIPassword)
+	s.http = &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.guardRequest(w, r) {
+			mux.ServeHTTP(w, r)
+		}
+	})}
 	return s
 }
 
+func NewWithOptions(addr string, state *observe.State, service service, l *localization.Localizer, options AccessOptions) (*Server, error) {
+	s := New(addr, state, service, l)
+	if err := s.configureAccess(options); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (s *Server) Start() error {
+	// Validate even legacy New() callers before listening; never expose the
+	// default no-password server on a non-loopback interface.
+	if s.bindHost == "" {
+		if err := s.configureAccess(AccessOptions{}); err != nil {
+			return err
+		}
+	}
+	listener, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
 	go func() {
-		if err := s.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.http.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Printf("local ui server failed: %v", err)
 		}
 	}()
@@ -140,8 +171,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+	if !s.allowedPrivateData(r) {
 		http.Error(w, "local access only", http.StatusForbidden)
 		return
 	}
@@ -169,19 +199,8 @@ func (s *Server) handleHistoryHide(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || r.Header.Get("X-Autofetch-Local-Action") != "history-hide" {
+	if !s.allowedLocalAction(r, "history-hide") {
 		http.Error(w, "local access only", http.StatusForbidden)
-		return
-	}
-	hostName, _, hostErr := net.SplitHostPort(r.Host)
-	hostIP := net.ParseIP(hostName)
-	if hostErr != nil || (hostName != "localhost" && (hostIP == nil || !hostIP.IsLoopback())) {
-		http.Error(w, "local host required", http.StatusForbidden)
-		return
-	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
-		http.Error(w, "origin not permitted", http.StatusForbidden)
 		return
 	}
 	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
@@ -220,8 +239,7 @@ func (s *Server) handleArchives(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+	if !s.allowedPrivateData(r) {
 		http.Error(w, "local access only", http.StatusForbidden)
 		return
 	}
@@ -242,29 +260,15 @@ func (s *Server) handleArchives(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(items)
 }
 
-// Mutations are restricted to loopback with an explicit custom header. A
-// cross-origin browser request cannot send that header without CORS preflight,
-// which this server does not allow. Never expose it on a public bind.
+// Retry mutations require an explicit custom header and a trusted peer.
+// The LAN middleware also verifies the Host and same-origin POST.
 func (s *Server) handleArchiveRetry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || r.Header.Get("X-Autofetch-Local-Action") != "retry" {
+	if !s.allowedLocalAction(r, "retry") {
 		http.Error(w, "local access only", http.StatusForbidden)
-		return
-	}
-	// Block DNS-rebinding: the request Host itself must be a loopback literal
-	// (or localhost) before accepting a same-origin browser POST.
-	hostName, _, hostErr := net.SplitHostPort(r.Host)
-	hostIP := net.ParseIP(hostName)
-	if hostErr != nil || (hostName != "localhost" && (hostIP == nil || !hostIP.IsLoopback())) {
-		http.Error(w, "local host required", http.StatusForbidden)
-		return
-	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
-		http.Error(w, "origin not permitted", http.StatusForbidden)
 		return
 	}
 	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
@@ -302,19 +306,8 @@ func (s *Server) handleArchiveSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || r.Header.Get("X-Autofetch-Local-Action") != "archive-settings" {
+	if !s.allowedLocalAction(r, "archive-settings") {
 		http.Error(w, "local access only", http.StatusForbidden)
-		return
-	}
-	hostName, _, hostErr := net.SplitHostPort(r.Host)
-	hostIP := net.ParseIP(hostName)
-	if hostErr != nil || (hostName != "localhost" && (hostIP == nil || !hostIP.IsLoopback())) {
-		http.Error(w, "local host required", http.StatusForbidden)
-		return
-	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
-		http.Error(w, "origin not permitted", http.StatusForbidden)
 		return
 	}
 	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
@@ -432,29 +425,141 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
+	}
+	// Leave the password unchanged when both fields are empty. Password
+	// writes require a same-origin request even on localhost (login CSRF).
+	password, repeat := r.PostFormValue("webui_password"), r.PostFormValue("webui_password_repeat")
+	if password != "" || repeat != "" {
+		if !s.allowedRemote(r) || !s.validLocalHost(r) || r.Header.Get("Origin") != "http://"+r.Host {
+			http.Error(w, "same-origin action required", http.StatusForbidden)
+			return
+		}
+		if password != repeat {
+			s.renderSettings(w, r, s.l.T("webui.password_mismatch"))
+			return
+		}
+		if err := config.ValidateWebUIPassword(password); err != nil {
+			s.renderSettings(w, r, err.Error())
+			return
+		}
 	}
 	downloadDir := strings.TrimSpace(r.FormValue("download_dir"))
 	if downloadDir == "" {
 		downloadDir = strings.TrimSpace(s.service.DownloadDir())
 	}
-	ircCfg := s.service.IRCConfig().WithDefaults()
-	if err := s.service.UpdateLocalSettings(downloadDir, ircCfg, ircCfg.AutoRegister, ircCfg.RegistrationEmail); err != nil {
-		s.renderSettings(w, r, err.Error())
-		return
+	// A password-only save must not restart a running download worker.
+	// Local settings are persisted only if the download folder changed.
+	if filepath.Clean(downloadDir) != filepath.Clean(s.service.DownloadDir()) {
+		ircCfg := s.service.IRCConfig().WithDefaults()
+		if err := s.service.UpdateLocalSettings(downloadDir, ircCfg, ircCfg.AutoRegister, ircCfg.RegistrationEmail); err != nil {
+			s.renderSettings(w, r, err.Error())
+			return
+		}
+	}
+	if password != "" {
+		// Hold the access lock during persistence so later requests cannot
+		// enter with stale credentials once the change is completed.
+		s.accessMu.Lock()
+		var err error
+		if len(s.password) == 0 {
+			if setter, ok := s.service.(interface{ SetWebUIPassword(string) error }); ok {
+				err = setter.SetWebUIPassword(password)
+			} else {
+				err = fmt.Errorf("WebUI password setup unavailable")
+			}
+		} else {
+			if changer, ok := s.service.(interface{ ChangeWebUIPassword(string) error }); ok {
+				err = changer.ChangeWebUIPassword(password)
+			} else {
+				err = fmt.Errorf("WebUI password change unavailable")
+			}
+		}
+		if err == nil {
+			s.password = []byte(password)
+		}
+		s.accessMu.Unlock()
+		if err != nil {
+			s.renderSettings(w, r, err.Error())
+			return
+		}
 	}
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
 
+// handleSetWebUIPassword is a one-time bootstrap action. The password is never
+// sent to the portal or stored in client.json. A same-origin POST is mandatory
+// even for loopback, to prevent login-CSRF and unauthenticated LAN lockout.
+func (s *Server) handleSetWebUIPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.allowedRemote(r) || !s.validLocalHost(r) || r.Header.Get("Origin") != "http://"+r.Host {
+		http.Error(w, "same-origin action required", http.StatusForbidden)
+		return
+	}
+	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/x-www-form-urlencoded") {
+		http.Error(w, "form encoding required", http.StatusUnsupportedMediaType)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	password := r.PostFormValue("webui_password")
+	if password != r.PostFormValue("webui_password_repeat") {
+		s.renderSettings(w, r, s.l.T("webui.password_mismatch"))
+		return
+	}
+	if err := config.ValidateWebUIPassword(password); err != nil {
+		s.renderSettings(w, r, err.Error())
+		return
+	}
+	setter, ok := s.service.(interface{ SetWebUIPassword(string) error })
+	if !ok {
+		http.Error(w, "password setup unavailable", http.StatusNotImplemented)
+		return
+	}
+	s.accessMu.Lock()
+	if len(s.password) != 0 {
+		s.accessMu.Unlock()
+		http.Error(w, "password already configured", http.StatusConflict)
+		return
+	}
+	// Hold the access lock while persisting so new requests cannot enter the
+	// unprotected mode after the password is successfully installed.
+	err := setter.SetWebUIPassword(password)
+	if err == nil {
+		s.password = []byte(password)
+	}
+	s.accessMu.Unlock()
+	if err != nil {
+		s.renderSettings(w, r, err.Error())
+		return
+	}
+	// The next request requires HTTP Basic Auth (user: autofetch).
+	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+}
+
 func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, errMsg string) {
+	_, canSetup := s.service.(interface{ SetWebUIPassword(string) error })
+	_, canChange := s.service.(interface{ ChangeWebUIPassword(string) error })
+	s.accessMu.RLock()
+	hasPassword := len(s.password) != 0
+	s.accessMu.RUnlock()
 	data := map[string]any{
-		"Title":       s.l.T("settings.title"),
-		"Lang":        s.l.Language(),
-		"T":           s.l.T,
-		"Error":       s.l.UserError(errMsg),
-		"DownloadDir": s.service.DownloadDir(),
+		"ShowWebUIPasswordFields": (canSetup && !hasPassword) || (canChange && hasPassword),
+		"WebUIPasswordEnabled":    hasPassword,
+		"Title":                   s.l.T("settings.title"),
+		"Lang":                    s.l.Language(),
+		"T":                       s.l.T,
+		"Error":                   s.l.UserError(errMsg),
+		"DownloadDir":             s.service.DownloadDir(),
 	}
 
 	_ = settingsTemplate.Execute(w, data)
@@ -875,8 +980,34 @@ refresh();refreshDownloads();setInterval(refresh,2000);setInterval(refreshDownlo
 </body></html>`))
 
 var settingsTemplate = template.Must(template.New("settings").Parse(`<!doctype html>
-<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:900px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px}label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}select{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}input[type=checkbox]{width:auto}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#6b7280;margin-top:12px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}</style></head>
-<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p>{{call .T "settings.general_intro"}}</p>{{if .Error}}<div class="error">{{.Error}}</div>{{end}}<form method="post" action="/settings"><label>{{call .T "settings.download_folder"}}</label><input name="download_dir" value="{{.DownloadDir}}"><p class="note">{{call .T "settings.irc_separate_hint"}}</p><div class="actions"><button class="primary" type="submit">{{call .T "action.save"}}</button><a class="button secondary" href="/irc/setup">{{call .T "irc.title"}}</a><a class="button secondary" href="/">{{call .T "action.back"}}</a></div></form></div></div></body></html>`))
+<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}
+.wrap{max-width:900px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px}
+label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}
+input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}
+.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}
+.note{font-size:13px;color:#6b7280;margin-top:10px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}
+.login-info{border:1px solid #94a3b8;border-left:5px solid #334155;background:#f8fafc;border-radius:10px;padding:12px 16px;margin:16px 0}
+.login-info p{margin:8px 0 0}.login-user{font-size:17px;font-weight:650}.login-user code{background:#e2e8f0;padding:3px 9px;border-radius:5px;color:#0f172a}
+</style></head>
+<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p>{{call .T "settings.general_intro"}}</p>
+{{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
+<form method="post" action="/settings">
+<label for="download-dir">{{call .T "settings.download_folder"}}</label><input id="download-dir" name="download_dir" value="{{.DownloadDir}}">
+<p class="note">{{call .T "settings.irc_separate_hint"}}</p>
+{{if .ShowWebUIPasswordFields}}
+<hr><h2>{{call .T "webui.password_heading"}}</h2>
+{{if .WebUIPasswordEnabled}}<p class="note">{{call .T "webui.password_active_hint"}}</p>{{else}}<p class="note">{{call .T "webui.password_setup_hint"}}</p>{{end}}
+<div class="login-info" role="note"><strong>{{call .T "webui.login_heading"}}</strong><p class="login-user">{{call .T "webui.login_username"}} <code>autofetch</code></p><p>{{call .T "webui.login_after_save"}}</p></div>
+<label for="webui-password">{{call .T "webui.new_password"}}</label>
+<input id="webui-password" name="webui_password" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="{{call .T "webui.leave_unchanged"}}">
+<label for="webui-password-repeat">{{call .T "webui.repeat_password"}}</label>
+<input id="webui-password-repeat" name="webui_password_repeat" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="{{call .T "webui.leave_unchanged"}}">
+<p class="note">{{call .T "webui.password_http_warning"}}</p>
+{{else if .WebUIPasswordEnabled}}<hr><h2>{{call .T "webui.password_heading"}}</h2><p class="note">{{call .T "webui.password_active"}}</p>{{end}}
+<div class="actions"><button class="primary" type="submit">{{call .T "action.save"}}</button><a class="button secondary" href="/irc/setup">{{call .T "irc.title"}}</a><a class="button secondary" href="/">{{call .T "action.back"}}</a></div>
+</form></div></div></body></html>`))
 
 var ircSetupTemplate = template.Must(template.New("ircsetup").Parse(`<!doctype html>
 <html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:980px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px}label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}input[type=checkbox]{width:auto;margin-right:8px}.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.layout{display:grid;grid-template-columns:280px 1fr;gap:16px}.netlist{display:flex;flex-direction:column;gap:10px}.netitem{display:block;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;text-decoration:none;color:#111827;background:#fff}.netitem.active{border-color:#111827;background:#f9fafb}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#6b7280;margin-top:12px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}@media(max-width:760px){.row,.layout{grid-template-columns:1fr}}</style></head>

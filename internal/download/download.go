@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/autofetch-de/autofetch-client/internal/filepermissions"
 )
 
 type Result struct {
@@ -206,7 +208,7 @@ func DownloadToFile(ctx context.Context, httpClient *http.Client, url, destPath 
 		return nil, prog, fmt.Errorf("http_size_mismatch: received=%d expected=%d", total, expectedSize)
 	}
 	// Finalize only a complete transfer.
-	if err := os.Rename(partPath, destPath); err != nil {
+	if err := filepermissions.PublishCompletedFile(partPath, destPath); err != nil {
 		return nil, prog, err
 	}
 	_ = os.Remove(metaPath)

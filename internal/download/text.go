@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/autofetch-de/autofetch-client/internal/filepermissions"
 )
 
 // DownloadText downloads a (usually small) subtitle file to a final path atomically.
@@ -60,5 +62,5 @@ func DownloadText(ctx context.Context, httpClient *http.Client, url, destPath st
 		return err
 	}
 
-	return os.Rename(partPath, destPath)
+	return filepermissions.PublishCompletedFile(partPath, destPath)
 }

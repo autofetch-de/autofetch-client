@@ -58,7 +58,11 @@ func expandNested(ctx context.Context, root string, limits Limits, remainingDept
 			return fmt.Errorf("archive_uncompressed_limit")
 		}
 		if _, err := extract(ctx, p, "", childLimits, remainingDepth-1, nil); err != nil {
-			return fmt.Errorf("archive_nested_failed: %w", err)
+			rel, relErr := filepath.Rel(root, p)
+			if relErr != nil {
+				return fmt.Errorf("archive_nested_failed: %w", err)
+			}
+			return fmt.Errorf("archive_nested_failed: %s: %w", rel, err)
 		}
 		if _, _, err := stageUsage(ctx, root, limits); err != nil {
 			return err

@@ -260,6 +260,7 @@ func TestDCCResumeLiveSimulatedBot(t *testing.T) {
 				if err != nil || !bytes.Equal(got, data) {
 					t.Fatalf("result %q err=%v", got, err)
 				}
+				assertDownloadMode(t, dest, 0644)
 				if err := <-dccDone; err != nil {
 					t.Fatalf("dcc server: %v", err)
 				}

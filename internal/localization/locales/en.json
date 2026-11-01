@@ -233,5 +233,17 @@
   "activity.title": "Activity",
   "activity.refresh": "Refresh",
   "update.available_short": "Update available:",
-  "update.download": "Download new version"
+  "update.download": "Download new version",
+  "webui.password_heading": "Web UI password",
+  "webui.password_setup_hint": "Optional: Set a password for LAN access here. Leave both fields blank to keep your current password-free access.",
+  "webui.new_password": "New password (optional, at least 12 characters)",
+  "webui.repeat_password": "Repeat new password",
+  "webui.password_active": "Password protection enabled. Username: autofetch. Password changes from the form are unavailable in this configuration.",
+  "webui.password_mismatch": "The passwords do not match.",
+  "webui.password_active_hint": "Password protection is enabled. Enter a new password to change it, or leave both fields blank to keep the current password.",
+  "webui.leave_unchanged": "Leave blank to keep the password unchanged",
+  "webui.login_heading": "Important: How to sign in",
+  "webui.login_username": "Username:",
+  "webui.login_after_save": "After saving a new password, your browser will prompt for the username and password on the next request.",
+  "webui.password_http_warning": "Note: HTTP does not encrypt LAN sign-in traffic. Use only on a trusted network or through an SSH tunnel."
 }

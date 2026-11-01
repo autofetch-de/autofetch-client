@@ -116,13 +116,15 @@ type Config struct {
 	MaxConcurrentDownloads int
 	LogLevel               string
 
-	RePair          bool
-	Headless        bool
-	PrintCodeOnly   bool
-	EnableWebUI     bool
-	OpenBrowser     bool
-	NoBrowser       bool
-	WebUIListenAddr string
+	RePair             bool
+	Headless           bool
+	PrintCodeOnly      bool
+	EnableWebUI        bool
+	OpenBrowser        bool
+	NoBrowser          bool
+	WebUIListenAddr    string
+	WebUIPasswordFile  string
+	WebUILANNoPassword bool
 }
 
 func (c IRCConfig) WithDefaults() IRCConfig {
@@ -248,7 +250,9 @@ func Load(l *localization.Localizer) Config {
 	c.EnableWebUI = boolEnv("AUTOFETCH_WEBUI", true)
 	c.OpenBrowser = boolEnv("AUTOFETCH_OPEN_BROWSER", false)
 	c.NoBrowser = boolEnv("AUTOFETCH_NO_BROWSER", false)
-	c.WebUIListenAddr = getenv("AUTOFETCH_WEBUI_ADDR", "127.0.0.1:23324")
+	c.WebUIListenAddr = getenv("AUTOFETCH_WEBUI_ADDR", defaultWebUIAddr(c.WebUIListenAddr))
+	c.WebUIPasswordFile = getenv("AUTOFETCH_WEBUI_PASSWORD_FILE", c.WebUIPasswordFile)
+	c.WebUILANNoPassword = boolEnv("AUTOFETCH_WEBUI_LAN_NO_PASSWORD", c.WebUILANNoPassword)
 
 	flag.StringVar(&c.ConfigPath, "config", c.ConfigPath, l.T("flag.config"))
 	flag.StringVar(&c.ServerBaseURL, "server", c.ServerBaseURL, "SERVER_BASE_URL")
@@ -267,6 +271,8 @@ func Load(l *localization.Localizer) Config {
 	flag.BoolVar(&c.OpenBrowser, "open-browser", c.OpenBrowser, l.T("flag.open_browser"))
 	flag.BoolVar(&c.NoBrowser, "no-browser", c.NoBrowser, l.T("flag.no_browser"))
 	flag.StringVar(&c.WebUIListenAddr, "webui-addr", c.WebUIListenAddr, l.T("flag.webui_addr"))
+	flag.StringVar(&c.WebUIPasswordFile, "webui-password-file", c.WebUIPasswordFile, "File containing Web UI Basic Auth password (mode 0600)")
+	flag.BoolVar(&c.WebUILANNoPassword, "webui-lan-no-password", c.WebUILANNoPassword, "Explicitly allow LAN Web UI without password (trusted LAN only)")
 
 	hbi := flag.Int("heartbeat-interval", int(c.HeartbeatInterval.Seconds()), "HEARTBEAT_INTERVAL_SECONDS")
 	flag.IntVar(&c.HeartbeatExtendSeconds, "heartbeat-extend", c.HeartbeatExtendSeconds, "HEARTBEAT_EXTEND_SECONDS")
@@ -277,7 +283,10 @@ func Load(l *localization.Localizer) Config {
 	flag.Parse()
 	c.HeartbeatInterval = time.Duration(*hbi) * time.Second
 	if c.Headless {
-		c.EnableWebUI = false
+		// Legacy --headless disables the WebUI unless explicitly enabled.
+		if !flagPassed("webui") && os.Getenv("AUTOFETCH_WEBUI") == "" {
+			c.EnableWebUI = false
+		}
 		c.OpenBrowser = false
 	}
 	if c.NoBrowser {
@@ -328,6 +337,15 @@ func Load(l *localization.Localizer) Config {
 		if c.IRC.DefaultNick == "" && len(c.IRC.Networks) == 0 {
 			c.IRC = persisted.IRC.WithDefaults()
 		}
+		if !flagPassed("webui-addr") && os.Getenv("AUTOFETCH_WEBUI_ADDR") == "" {
+			c.WebUIListenAddr = defaultWebUIAddr(persisted.WebUIListenAddr)
+		}
+		if !flagPassed("webui-password-file") && os.Getenv("AUTOFETCH_WEBUI_PASSWORD_FILE") == "" {
+			c.WebUIPasswordFile = persisted.WebUIPasswordFile
+		}
+		if !flagPassed("webui-lan-no-password") && os.Getenv("AUTOFETCH_WEBUI_LAN_NO_PASSWORD") == "" {
+			c.WebUILANNoPassword = persisted.WebUILANNoPassword
+		}
 	}
 
 	if c.ExtractNestedDepth < 0 || c.ExtractNestedDepth > 3 {
@@ -338,6 +356,13 @@ func Load(l *localization.Localizer) Config {
 	}
 	c.IRC = c.IRC.WithDefaults()
 	return c
+}
+
+func defaultWebUIAddr(v string) string {
+	if v == "" {
+		return "127.0.0.1:23324"
+	}
+	return v
 }
 
 func Persist(c Config) error {
@@ -368,6 +393,9 @@ func Persist(c Config) error {
 		ExtractDeleteOriginal bool       `json:"extract_delete_original,omitempty"`
 		RevokedAt             *time.Time `json:"revoked_at,omitempty"`
 		AuthPausedAt          *time.Time `json:"auth_paused_at,omitempty"`
+		WebUIListenAddr       string     `json:"webui_addr,omitempty"`
+		WebUIPasswordFile     string     `json:"webui_password_file,omitempty"`
+		WebUILANNoPassword    bool       `json:"webui_lan_no_password,omitempty"`
 		IRC                   IRCConfig  `json:"irc"`
 	}{
 		ServerBaseURL:         c.ServerBaseURL,
@@ -383,6 +411,9 @@ func Persist(c Config) error {
 		ExtractDeleteOriginal: c.ExtractDeleteOriginal,
 		RevokedAt:             c.RevokedAt,
 		AuthPausedAt:          c.AuthPausedAt,
+		WebUIListenAddr:       c.WebUIListenAddr,
+		WebUIPasswordFile:     c.WebUIPasswordFile,
+		WebUILANNoPassword:    c.WebUILANNoPassword,
 		IRC:                   sanitizedIRC,
 	}
 	bs, err := json.MarshalIndent(payload, "", "  ")
@@ -447,6 +478,9 @@ func loadFromFile(c *Config, path string) error {
 		ExtractDeleteOriginal bool       `json:"extract_delete_original,omitempty"`
 		RevokedAt             *time.Time `json:"revoked_at,omitempty"`
 		AuthPausedAt          *time.Time `json:"auth_paused_at,omitempty"`
+		WebUIListenAddr       string     `json:"webui_addr,omitempty"`
+		WebUIPasswordFile     string     `json:"webui_password_file,omitempty"`
+		WebUILANNoPassword    bool       `json:"webui_lan_no_password,omitempty"`
 		IRC                   IRCConfig  `json:"irc"`
 	}
 	if err := json.Unmarshal(bs, &payload); err != nil {
@@ -481,6 +515,9 @@ func loadFromFile(c *Config, path string) error {
 	c.PairedAt = payload.PairedAt
 	c.RevokedAt = payload.RevokedAt
 	c.AuthPausedAt = payload.AuthPausedAt
+	c.WebUIListenAddr = payload.WebUIListenAddr
+	c.WebUIPasswordFile = payload.WebUIPasswordFile
+	c.WebUILANNoPassword = payload.WebUILANNoPassword
 	c.IRC = payload.IRC.WithDefaults()
 
 	secrets, err := loadIRCSecrets(path)

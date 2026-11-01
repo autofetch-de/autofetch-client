@@ -437,6 +437,93 @@ func (s *Service) ConfigPath() string {
 	}
 	return s.cfg.ConfigPath
 }
+
+// SetWebUIPassword performs the one-time password bootstrap. Credentials are
+// written to a new, private file; only its path is persisted in client.json.
+// Existing password files are never overwritten by the unauthenticated setup.
+func (s *Service) SetWebUIPassword(password string) error {
+	if err := config.ValidateWebUIPassword(password); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg == nil || s.cfg.ConfigPath == "" {
+		return fmt.Errorf("client configuration path unavailable")
+	}
+	if s.cfg.WebUIPasswordFile != "" {
+		return fmt.Errorf("WebUI password already configured")
+	}
+	path := filepath.Join(filepath.Dir(s.cfg.ConfigPath), "webui.password")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create WebUI password directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("create WebUI password file: %w", err)
+	}
+	if _, err = file.WriteString(password); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("write WebUI password file: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("close WebUI password file: %w", err)
+	}
+	oldNoPassword := s.cfg.WebUILANNoPassword
+	s.cfg.WebUIPasswordFile = path
+	s.cfg.WebUILANNoPassword = false
+	if err = config.Persist(*s.cfg); err != nil {
+		s.cfg.WebUIPasswordFile = ""
+		s.cfg.WebUILANNoPassword = oldNoPassword
+		_ = os.Remove(path)
+		return fmt.Errorf("save WebUI password configuration: %w", err)
+	}
+	return nil
+}
+
+// ChangeWebUIPassword rotates an already configured WebUI password. The new
+// credential is atomically published in the same directory and is not stored
+// in client.json. The caller must have authenticated with the current one.
+func (s *Service) ChangeWebUIPassword(password string) error {
+	if err := config.ValidateWebUIPassword(password); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg == nil || s.cfg.WebUIPasswordFile == "" {
+		return fmt.Errorf("WebUI password is not configured")
+	}
+	path := s.cfg.WebUIPasswordFile
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect WebUI password file: %w", err)
+	}
+	if !info.Mode().IsRegular() || (gort.GOOS != "windows" && info.Mode().Perm()&0077 != 0) {
+		return fmt.Errorf("WebUI password file must be regular and private")
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".webui-password-*")
+	if err != nil {
+		return fmt.Errorf("create new WebUI password file: %w", err)
+	}
+	defer os.Remove(file.Name())
+	if _, err = file.WriteString(password); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write new WebUI password file: %w", err)
+	}
+	if err = file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync WebUI password file: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("close WebUI password file: %w", err)
+	}
+	if err = os.Rename(file.Name(), path); err != nil {
+		return fmt.Errorf("replace WebUI password file: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) DownloadDir() string {
 	if s == nil || s.cfg == nil {
 		return ""

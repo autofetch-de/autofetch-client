@@ -16,8 +16,8 @@ Jedes Release enthält zwei festsprachige Varianten, die aus derselben Codebasis
 Beim Download wird die Variante anhand des Sprachsuffixes ausgewählt, zum Beispiel:
 
 ```text
-autofetch-gui-windows-amd64-de-v1.1.0.exe
-autofetch-headless-linux-arm64-en-v1.1.0
+autofetch-gui-windows-amd64-de-v1.2.1.exe
+autofetch-headless-linux-arm64-en-v1.2.1
 ```
 
 Die Sprache ändert keine API-Pfade, Konfigurationsschlüssel, technischen Fehlercodes oder Protokollbegriffe. Technische Logs bleiben in beiden Varianten Englisch, damit Supportinformationen vergleichbar bleiben.
@@ -55,6 +55,39 @@ Der Headless-Build ist für Server, NAS-Systeme und kleine Geräte vorgesehen. R
 - macOS Apple Silicon
 
 Der normale Kommandozeilenclient kann zusätzlich eine lokale Statusoberfläche auf `127.0.0.1:23324` bereitstellen. Mit `--headless` wird sie deaktiviert.
+
+
+## WebUI im lokalen Netzwerk (ab v1.2.1)
+
+**Standard:** `127.0.0.1:23324`, ohne LAN-Freigabe. Ein einfacher Headless-Start mit `--headless` schaltet die WebUI weiterhin aus. Für LAN-Zugriff ist eine **konkrete private IP-Adresse des Clients** nötig (kein `0.0.0.0`, kein öffentlicher Hostname).
+
+Mit Passwort (empfohlen):
+
+```bash
+# Passwort als der Benutzer erzeugen, unter dem der Client läuft:
+umask 077
+mkdir -p "$HOME/.config/autofetch"
+openssl rand -hex 24 > "$HOME/.config/autofetch/webui.password"
+chmod 600 "$HOME/.config/autofetch/webui.password"
+
+./autofetch-de --headless --webui=true \
+  --webui-addr=192.168.1.50:23324 \
+  --webui-password-file="$HOME/.config/autofetch/webui.password"
+```
+
+Die IP `192.168.1.50` ist durch **die tatsächliche LAN-Adresse des Client-Rechners** zu ersetzen. Im Browser `http://192.168.1.50:23324` aufrufen, Benutzername `autofetch`, Passwort aus der Passwortdatei. Die WebUI einschließlich Historie und Aktionen ist dann geschützt.
+
+Ohne Passwort **nur mit ausdrücklicher Freigabe und in einem vollständig vertrauenswürdigen LAN**:
+
+```bash
+./autofetch-de --headless --webui=true --webui-addr=192.168.1.50:23324 --webui-lan-no-password
+```
+
+**Passwort in der WebUI einrichten oder ändern:** Unter **Einstellungen → WebUI-Passwort** befinden sich zwei **optionale** Passwortfelder. Beide leer lassen, um das bestehende Passwort **nicht zu ändern** (bei bislang passwortlosem LAN-Zugriff bleibt dieser Modus dann bestehen). Zum Einrichten oder Ändern das neue Passwort zweimal eingeben und mit **Speichern** am Ende des Formulars bestätigen. Die Browser-Anmeldung erfolgt immer mit **Benutzername `autofetch`** und dem neu gesetzten Passwort. Die Änderung ist sofort aktiv, auch ohne Neustart. Beim erstmaligen Einrichten wird die private Datei `webui.password` (Dateirechte `0600`) neben `client.json` erstellt; in der JSON-Datei steht nur der Dateipfad. Spätere Passwortänderungen ersetzen die geschützte Passwortdatei atomar. Falls `--webui-lan-no-password` noch im Startskript oder der systemd-Konfiguration steht, hat die eingerichtete Passwortdatei bei Neustarts Vorrang; das Flag sollte trotzdem entfernt werden. **Achtung:** Die Passworteingabe und HTTP-Basic-Anmeldung sind über HTTP nicht verschlüsselt. Nur im vertrauenswürdigen LAN oder lokal über SSH-Tunnel verwenden.
+
+Alternativ für systemd: `Environment=AUTOFETCH_WEBUI=true`, `Environment=AUTOFETCH_WEBUI_ADDR=192.168.1.50:23324`, `Environment=AUTOFETCH_WEBUI_PASSWORD_FILE=/var/lib/autofetch/webui.password` (oder ausdrücklich `Environment=AUTOFETCH_WEBUI_LAN_NO_PASSWORD=true`). Die Passwortdatei muss für den systemd-Dienstbenutzer lesbar und für andere Benutzer nicht zugänglich sein (`0600`); in `client.json` wird nur **der Pfad** gespeichert. Die Einstellungen sind auch über gleichnamige CLI-Flags möglich.
+
+**Sicherheit:** Die Browseroberfläche verwendet HTTP, **kein HTTPS**. Die HTTP-Basic-Anmeldung schützt vor nicht autorisierten Zugriffen, jedoch **nicht** vor Mitlesen des Passworts im lokalen Netzwerk. Nur in einem vertrauenswürdigen LAN nutzen; für unsichere Netze per SSH-Tunnel oder VPN auf `127.0.0.1` zugreifen. Keinen Router-Port freigeben, keine Internet-Exposition. Ein sicherer Host- und Origin-Check verhindert nicht alle Risiken eines kompromittierten LANs.
 
 ## Erster Start und Pairing
 
@@ -96,7 +129,7 @@ Die Sprache wird nicht in der Konfiguration gespeichert. Sie ist fest in die gew
 Die gewählte Binärdatei unter einem stabilen lokalen Namen installieren:
 
 ```bash
-sudo install -m 0755 autofetch-headless-linux-amd64-de-v1.1.0 /usr/local/bin/autofetch
+sudo install -m 0755 autofetch-headless-linux-amd64-de-v1.2.1 /usr/local/bin/autofetch
 ```
 
 `/etc/systemd/system/autofetch.service` anlegen:

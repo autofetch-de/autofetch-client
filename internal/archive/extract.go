@@ -242,6 +242,11 @@ func extract(ctx context.Context, source, digest string, limits Limits, depth in
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
+	// Only publish a verified, complete tree with the legacy user-readable
+	// permissions. The staging tree remains private until this point.
+	if err := prepareReadableTree(ctx, stage); err != nil {
+		return "", err
+	}
 	x.emit("publishing")
 	if err = os.Rename(stage, dest); err != nil {
 		return "", err

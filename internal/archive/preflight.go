@@ -120,7 +120,11 @@ func estimateOutputBytes(ctx context.Context, source string, limits Limits) (int
 		if err := cmd.Run(); err != nil {
 			return 0, fmt.Errorf("archive_7zip_list_failed: %w", err)
 		}
-		entries, err := parseSevenZipList(output.Bytes(), limits, volumeLeader(source))
+		volumes, err := collectVolumes(source)
+		if err != nil {
+			return 0, err
+		}
+		entries, err := parseSevenZipList(output.Bytes(), limits, len(volumes) > 1 || volumeLeader(source))
 		if err != nil {
 			return 0, err
 		}
