@@ -69,9 +69,6 @@ func Bootstrap(cfg *config.Config, info buildinfo.Info) (*Service, *observe.Stat
 		state.Error(fmt.Errorf("authentication paused: invalid client credentials; re-pair required"))
 	}
 	log.SetOutput(io.MultiWriter(os.Stderr, &observe.LogWriter{State: state, Debug: strings.EqualFold(strings.TrimSpace(cfg.LogLevel), "debug") || strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOFETCH_DEBUG")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOFETCH_DEBUG")), "true")}))
-	// Log effective policy, not just CLI flags: client.json and environment
-	// variables can enable archive extraction and deletion without flags.
-	log.Printf("archive processing: server-managed per job; legacy local archive flags are ignored")
 
 	runtimeFallback := clientruntime.Config{PollIntervalSec: 60, MaxParallelDownloads: cfg.MaxConcurrentDownloads, BandwidthLimitKiBPerSec: 0, HeartbeatIntervalSec: int(cfg.HeartbeatInterval.Seconds()), HeartbeatExtendSec: cfg.HeartbeatExtendSeconds, DedupeClaimTTLSec: cfg.DedupeClaimTTLSeconds}.WithDefaults()
 	cfgMgr := clientruntime.NewConfigManager(apiClient, runtimeFallback, func(next clientruntime.Config) {

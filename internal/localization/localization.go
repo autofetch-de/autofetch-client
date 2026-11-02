@@ -129,6 +129,8 @@ func (l *Localizer) UserError(raw string) string {
 		return l.T("error.pairing_rejected")
 	case strings.Contains(lower, "pairing approved but credentials missing"):
 		return l.T("error.pairing_credentials_missing")
+	case strings.Contains(lower, "irc_registration_pending"):
+		return l.T("error.irc_registration_pending")
 	case strings.Contains(lower, "irc_registered_nick_required"):
 		return l.T("error.irc_registered_nick_required")
 	case strings.Contains(lower, "sasl_auth_failed"):

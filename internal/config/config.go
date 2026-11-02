@@ -14,9 +14,11 @@ import (
 )
 
 type IRCNickServ struct {
-	Enabled  bool   `json:"enabled"`
-	Password string `json:"password"`
-	Command  string `json:"command"`
+	RegistrationPending  bool   `json:"registration_pending,omitempty"`
+	RequiresRegistration bool   `json:"requires_registration,omitempty"`
+	Enabled              bool   `json:"enabled"`
+	Password             string `json:"password"`
+	Command              string `json:"command"`
 }
 
 type IRCSASL struct {
@@ -36,8 +38,10 @@ type IRCNetwork struct {
 	Username string `json:"username"`
 	Realname string `json:"realname"`
 
-	NickServ IRCNickServ `json:"nickserv"`
-	SASL     IRCSASL     `json:"sasl"`
+	// RegistrationEmail belongs to this network and is stored only in irc-secrets.json.
+	RegistrationEmail string      `json:"-"`
+	NickServ          IRCNickServ `json:"nickserv"`
+	SASL              IRCSASL     `json:"sasl"`
 }
 
 type IRCConfig struct {
@@ -57,8 +61,9 @@ type IRCSecrets struct {
 }
 
 type IRCNetworkSecrets struct {
-	NickServ IRCNickServSecrets `json:"nickserv"`
-	SASL     IRCSASLSecrets     `json:"sasl"`
+	RegistrationEmail string             `json:"registration_email,omitempty"`
+	NickServ          IRCNickServSecrets `json:"nickserv"`
+	SASL              IRCSASLSecrets     `json:"sasl"`
 }
 
 type IRCNickServSecrets struct {
@@ -154,6 +159,7 @@ func (c IRCConfig) WithDefaults() IRCConfig {
 			}
 		}
 		n.Nick = strings.TrimSpace(n.Nick)
+		n.RegistrationEmail = strings.TrimSpace(n.RegistrationEmail)
 		n.Username = strings.TrimSpace(n.Username)
 		n.Realname = strings.TrimSpace(n.Realname)
 		n.NickServ.Password = strings.TrimSpace(n.NickServ.Password)
@@ -602,12 +608,14 @@ func splitIRCSecrets(ircCfg IRCConfig) (IRCConfig, IRCSecrets) {
 			continue
 		}
 		var sec IRCNetworkSecrets
+		sec.RegistrationEmail = strings.TrimSpace(n.RegistrationEmail)
 		sec.NickServ.Password = strings.TrimSpace(n.NickServ.Password)
 		sec.SASL.Username = strings.TrimSpace(n.SASL.Username)
 		sec.SASL.Password = strings.TrimSpace(n.SASL.Password)
-		if sec.NickServ.Password != "" || sec.SASL.Username != "" || sec.SASL.Password != "" {
+		if sec.RegistrationEmail != "" || sec.NickServ.Password != "" || sec.SASL.Username != "" || sec.SASL.Password != "" {
 			secrets.IRC[key] = sec
 		}
+		n.RegistrationEmail = ""
 		n.NickServ.Password = ""
 		n.SASL.Password = ""
 		n.SASL.Username = ""
@@ -634,6 +642,7 @@ func mergeIRCSecrets(ircCfg IRCConfig, secrets IRCSecrets) IRCConfig {
 		if !ok {
 			continue
 		}
+		n.RegistrationEmail = strings.TrimSpace(sec.RegistrationEmail)
 		if strings.TrimSpace(sec.NickServ.Password) != "" {
 			n.NickServ.Password = strings.TrimSpace(sec.NickServ.Password)
 		}

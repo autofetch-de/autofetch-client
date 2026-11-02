@@ -116,7 +116,9 @@ func (s *Server) allowedLocalAction(r *http.Request, action string) bool {
 func (s *Server) guardRequest(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	// Keep off-site referrers suppressed while allowing browsers to submit
+	// same-origin forms with a non-null Origin header on the LAN.
+	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	if s.lan && !s.allowedRemote(r) {

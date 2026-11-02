@@ -1,6 +1,19 @@
 # Changelog
 
-## 1.2.1 - 2026-11-01
+## Unreleased (v1.2.2 candidate)
+
+### Added
+
+- Desktop NickServ enrollment: explicit registration, email, confirmation, verification, retry with saved credentials, reset, and sanitized live IRC progress.
+- Display server-provided IRC channels read-only in desktop settings; jobs continue to supply their required channels.
+
+### Changed
+
+- Store NickServ registration email separately for each IRC network in local `irc-secrets.json`; prefill it in both desktop and WebUI registration forms. Never reuse the legacy global registration email for new enrollments.
+- Limit routine IRC NOTICE, bot PRIVMSG, channel-join and XDCC request logs to `AUTOFETCH_IRC_DEBUG=1`; keep failures visible by default.
+- Remove the obsolete startup message about ignored legacy local archive flags.
+
+## Unreleased (v1.2.1)
 
 ### Added
 

@@ -541,7 +541,12 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 				r.ircMu.Lock()
 				_, netCfg, changed := internalirc.EnsureNetwork(r.IRCConfig, inst.IRC.Host, inst.IRC.Port, inst.IRC.TLS, inst.IRC.Channel)
 				if netCfg != nil {
-					autoRegister = r.IRCConfig.IRC.AutoRegister
+					// Record server-supplied prerequisite channels for informational
+					// display. Downloads still join only the channels in their job.
+					if internalirc.RememberJobChannels(netCfg, inst.IRC.PrerequisiteChannels) {
+						changed = true
+					}
+					autoRegister = false // Only explicit WebUI actions may register accounts.
 					registrationEmail = r.IRCConfig.IRC.RegistrationEmail
 					reverseDCCEnabled = r.IRCConfig.IRC.ReverseDCCEnabled
 					dccPortMin = r.IRCConfig.IRC.ReverseDCCPortMin
@@ -557,6 +562,11 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 					ircNick = internalirc.EffectiveNick(r.IRCConfig, netCfg)
 					ircUser = netCfg.Username
 					ircReal = netCfg.Realname
+					if netCfg.NickServ.RegistrationPending || netCfg.NickServ.RequiresRegistration {
+						dlErr = errors.New("irc_registration_pending: complete NickServ registration in local WebUI")
+						r.ircMu.Unlock()
+						return
+					}
 					nsEnabled = netCfg.NickServ.Enabled
 					nsPass = netCfg.NickServ.Password
 					nsCommand = netCfg.NickServ.Command
@@ -669,6 +679,14 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 					}
 				},
 			}, finalPath, r.bandwidthLimitBytesPerSec(), prog)
+			// Keep the actual rejected prerequisite channel from the IRC error,
+			// and add the network for the local WebUI configuration link.
+			if dlErr != nil {
+				lower := strings.ToLower(dlErr.Error())
+				if errors.Is(dlErr, download.ErrIRCRegisteredNickRequired) || strings.Contains(lower, "nickserv identify failed") || strings.Contains(lower, "nickserv register failed") || strings.Contains(lower, "sasl_auth_failed") {
+					dlErr = fmt.Errorf("%w; network=%s", dlErr, inst.IRC.Host)
+				}
+			}
 		default:
 			dlErr = errors.New("unsupported_mode: " + inst.Mode)
 		}

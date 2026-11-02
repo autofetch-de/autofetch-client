@@ -198,6 +198,25 @@ func EnsureNetwork(cfg *config.Config, host string, port int, tls bool, channel 
 	return len(cfg.IRC.Networks) - 1, &cfg.IRC.Networks[len(cfg.IRC.Networks)-1], true
 }
 
+// RememberJobChannels records channels supplied by a server job for display
+// in the local IRC settings. This is diagnostic history only: it must never
+// influence which channels a download joins (the job is authoritative).
+func RememberJobChannels(n *config.IRCNetwork, channels []string) bool {
+	if n == nil {
+		return false
+	}
+	changed := false
+	for _, raw := range channels {
+		channel := NormalizeChannel(raw)
+		if channel == "" || containsString(n.Channels, channel) {
+			continue
+		}
+		n.Channels = append(n.Channels, channel)
+		changed = true
+	}
+	return changed
+}
+
 func EffectiveNick(cfg *config.Config, n *config.IRCNetwork) string {
 	if cfg != nil {
 		EnsureDefaultNick(cfg)

@@ -222,3 +222,47 @@ func TestPersistedPasswordBeatsLegacyNoPasswordFlagOnRestart(t *testing.T) {
 		t.Fatalf("password did not authenticate: %d", rec.Code)
 	}
 }
+
+// LAN forms must remain usable without weakening the strict Origin check.
+// A no-referrer policy can cause browsers to send Origin: null for form POSTs.
+func TestLANFormPOSTOriginPolicy(t *testing.T) {
+	s, err := secureUI(t, "192.168.1.50:23324", AccessOptions{AllowUnauthenticatedLAN: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/irc/setup?network=irc.abjects.net", "/settings"} {
+		req := httptest.NewRequest(http.MethodGet, "http://192.168.1.50:23324"+path, nil)
+		req.RemoteAddr = "192.168.1.12:1234"
+		rec := httptest.NewRecorder()
+		s.http.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status=%d, body=%s", path, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Referrer-Policy"); got != "same-origin" {
+			t.Fatalf("GET %s: Referrer-Policy=%q, want same-origin", path, got)
+		}
+	}
+	for _, tc := range []struct {
+		name, origin string
+		want         int
+	}{
+		{"same-origin", "http://192.168.1.50:23324", http.StatusSeeOther},
+		{"null-origin", "null", http.StatusForbidden},
+		{"missing-origin", "", http.StatusForbidden},
+		{"foreign-origin", "https://example.org", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://192.168.1.50:23324/irc/setup", strings.NewReader("host=irc.abjects.net&generate_nick=1"))
+			req.RemoteAddr = "192.168.1.12:1234"
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			rec := httptest.NewRecorder()
+			s.http.Handler.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("POST /irc/setup: status=%d, want=%d, body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}

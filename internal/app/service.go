@@ -56,20 +56,22 @@ func (s *stopSignal) Mode() stopMode {
 }
 
 type Service struct {
-	mu           sync.Mutex
-	cfg          *config.Config
-	buildInfo    buildinfo.Info
-	api          *api.Client
-	state        *observe.State
-	localizer    *localization.Localizer
-	factory      RunnerFactory
-	runCtx       context.Context
-	cancelRun    context.CancelFunc
-	stopSignal   *stopSignal
-	runnerDone   chan struct{}
-	running      bool
-	updateStatus update.Status
-	pairing      bool
+	mu         sync.Mutex
+	cfg        *config.Config
+	buildInfo  buildinfo.Info
+	api        *api.Client
+	state      *observe.State
+	localizer  *localization.Localizer
+	factory    RunnerFactory
+	runCtx     context.Context
+	cancelRun  context.CancelFunc
+	stopSignal *stopSignal
+	// Incremented whenever a queued settings-triggered restart must be superseded.
+	settingsRestartGeneration uint64
+	runnerDone                chan struct{}
+	running                   bool
+	updateStatus              update.Status
+	pairing                   bool
 }
 
 func NewService(cfg *config.Config, info buildinfo.Info, apiClient *api.Client, state *observe.State, factory RunnerFactory) *Service {
@@ -129,6 +131,12 @@ func (s *Service) Localizer() *localization.Localizer {
 func (s *Service) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.startLocked()
+}
+
+// startLocked is also used after a previous worker has completely exited.
+// Callers must hold s.mu.
+func (s *Service) startLocked() error {
 	if s.running || s.pairing {
 		return nil
 	}
@@ -318,6 +326,7 @@ func (s *Service) Stop() error { return s.Pause() }
 func (s *Service) Pause() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settingsRestartGeneration++
 	if s.stopSignal != nil {
 		s.stopSignal.Set(stopModePause)
 	}
@@ -336,6 +345,7 @@ func (s *Service) Pause() error {
 func (s *Service) Shutdown() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.settingsRestartGeneration++
 	if s.stopSignal != nil {
 		s.stopSignal.Set(stopModeShutdown)
 	}
@@ -544,7 +554,14 @@ func (s *Service) IRCConfig() config.IRCConfig {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cfg.IRC
+	// Return independent slices. GUI editors and normalization must not mutate
+	// the active network configuration before a successful persisted save.
+	copied := s.cfg.IRC
+	copied.Networks = append([]config.IRCNetwork(nil), copied.Networks...)
+	for i := range copied.Networks {
+		copied.Networks[i].Channels = append([]string(nil), copied.Networks[i].Channels...)
+	}
+	return copied
 }
 func (s *Service) EnsureIRCDefaults() error {
 	s.mu.Lock()
@@ -588,6 +605,10 @@ func (s *Service) UpdateDownloadDir(dir string) error {
 	}
 	return s.Start()
 }
+
+// UpdateLocalSettings persists the configuration before restarting a running
+// worker. The previous worker may still own a DCC socket or journal receipt
+// after cancellation, so start the replacement only after runnerDone closes.
 func (s *Service) UpdateLocalSettings(dir string, ircCfg config.IRCConfig, autoRegister bool, registrationEmail string) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -602,24 +623,61 @@ func (s *Service) UpdateLocalSettings(dir string, ircCfg config.IRCConfig, autoR
 		s.mu.Unlock()
 		return fmt.Errorf("config missing")
 	}
+	// Persist a copy first: a failed disk write must not silently change the
+	// running identity or make the WebUI report a reset that wasn't saved.
+	next := *s.cfg
+	next.DownloadDir = dir
+	next.IRC = ircCfg
+	next.IRC.Networks = append([]config.IRCNetwork(nil), ircCfg.Networks...)
+	for i := range next.IRC.Networks {
+		next.IRC.Networks[i].Channels = append([]string(nil), next.IRC.Networks[i].Channels...)
+	}
+	if internalirc.EnsureDefaultNick(&next) {
+		next.IRC = next.IRC.WithDefaults()
+	}
+	if err := config.Persist(next); err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("persist local settings: %w", err)
+	}
 	wasActive := s.running || s.pairing
-	s.cfg.DownloadDir = dir
-	s.cfg.IRC = ircCfg
-	if internalirc.EnsureDefaultNick(s.cfg) {
-		s.cfg.IRC = s.cfg.IRC.WithDefaults()
-	}
-	err := config.Persist(*s.cfg)
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
+	*s.cfg = next
 	if !wasActive {
+		s.mu.Unlock()
 		return nil
 	}
-	if err := s.Shutdown(); err != nil {
-		return err
+	if s.stopSignal != nil {
+		s.stopSignal.Set(stopModeShutdown)
 	}
-	return s.Start()
+	if s.cancelRun != nil {
+		s.cancelRun()
+	}
+	s.running = false
+	s.pairing = false
+	s.cancelRun = nil
+	s.runCtx = nil
+	s.stopSignal = nil
+	s.state.SetRunning(false)
+	s.state.SetConnected(false)
+	s.settingsRestartGeneration++
+	generation := s.settingsRestartGeneration
+	previousDone := s.runnerDone
+	s.mu.Unlock()
+
+	go func() {
+		if previousDone != nil {
+			<-previousDone
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		// An explicit Stop/Pause/Shutdown supersedes this automatic restart.
+		if s.settingsRestartGeneration != generation {
+			return
+		}
+		if err := s.startLocked(); err != nil {
+			log.Printf("restart after IRC settings change failed: %v", err)
+		}
+	}()
+	return nil
 }
 func (s *Service) TestConnection(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)

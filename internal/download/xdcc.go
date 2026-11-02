@@ -3,6 +3,7 @@ package download
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -383,16 +385,24 @@ func markAutoRegistered(opt XDCCOptions, currentNick, autoRegisteredPassword str
 	}
 }
 
-func generateRegistrationPassword() string {
+// Registration credentials must not be derived from the current time.
+func generateRegistrationPassword() (string, error) {
 	const alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%_-"
-	buf := make([]byte, 18)
-	seed := time.Now().UnixNano()
-	for i := range buf {
-		seed = (seed*1664525 + 1013904223) & 0x7fffffff
-		buf[i] = alphabet[int(seed)%len(alphabet)]
+	password := make([]byte, 18)
+	limit := big.NewInt(int64(len(alphabet)))
+	for i := range password {
+		index, err := rand.Int(rand.Reader, limit)
+		if err != nil {
+			return "", err
+		}
+		password[i] = alphabet[index.Int64()]
 	}
-	return string(buf)
+	return string(password), nil
 }
+
+// Account creation is now an explicit WebUI-only action. Even when older
+// configs contain auto_register=true, a download can never register a nick.
+func autoRegistrationAllowed(_ XDCCOptions, _ string) bool { return false }
 
 func joinAuthRequiredError(line string) error {
 	return fmt.Errorf("%w: %s", ErrIRCRegisteredNickRequired, strings.TrimSpace(line))
@@ -640,10 +650,10 @@ func logRelevantIRCLine(phase, line, bot string) {
 	case "ERROR":
 		log.Printf("IRC ERROR during %s: %s", phase, strings.TrimSpace(trailing))
 	case "NOTICE":
-		log.Printf("IRC NOTICE during %s from %s: %s", phase, source, strings.TrimSpace(trailing))
+		ircDebugf("IRC NOTICE during %s from %s: %s", phase, source, strings.TrimSpace(trailing))
 	case "PRIVMSG":
 		if bot != "" && source == bot {
-			log.Printf("IRC PRIVMSG during %s from %s: %s", phase, source, strings.TrimSpace(trailing))
+			ircDebugf("IRC PRIVMSG during %s from %s: %s", phase, source, strings.TrimSpace(trailing))
 		}
 	default:
 		if len(command) == 3 && command[0] >= '0' && command[0] <= '9' {
@@ -663,7 +673,7 @@ func waitForChannelJoins(ctx context.Context, conn net.Conn, rw *bufio.ReadWrite
 		if _, exists := pending[key]; exists {
 			continue
 		}
-		log.Printf("Joining channel: %s", channel)
+		ircDebugf("Joining channel: %s", channel)
 		if err := writeLine("JOIN " + channel); err != nil {
 			return fmt.Errorf("irc_join_send_failed: channel=%s: %w", channel, err)
 		}
@@ -697,7 +707,7 @@ func waitForChannelJoins(ctx context.Context, conn net.Conn, rw *bufio.ReadWrite
 			for key, channel := range pending {
 				if strings.Contains(strings.ToLower(line), strings.ToLower(channel)) {
 					delete(pending, key)
-					log.Printf("Joined channel: %s", channel)
+					ircDebugf("Joined channel: %s", channel)
 				}
 			}
 			continue
@@ -706,16 +716,55 @@ func waitForChannelJoins(ctx context.Context, conn net.Conn, rw *bufio.ReadWrite
 			for key, channel := range pending {
 				if strings.Contains(strings.ToLower(line), strings.ToLower(channel)) {
 					delete(pending, key)
-					log.Printf("Joined channel: %s", channel)
+					ircDebugf("Joined channel: %s", channel)
 				}
 			}
 			continue
 		}
 		switch command {
 		case "403", "405", "471", "473", "474", "475", "477", "486":
+			if (command == "477" || command == "486") && isAuthRequiredMessage(line) {
+				for _, channel := range pending {
+					if strings.Contains(strings.ToLower(line), strings.ToLower(channel)) {
+						return fmt.Errorf("%w; channel=%s", joinAuthRequiredError(line), channel)
+					}
+				}
+				return joinAuthRequiredError(line)
+			}
 			return fmt.Errorf("irc_join_rejected: %s", line)
 		case "ERROR":
 			return fmt.Errorf("irc_error_during_channel_join: %s", line)
+		}
+	}
+	return nil
+}
+
+// Join sequentially so that after a registration-required rejection we retry
+// only the rejected channel, never an already joined prerequisite channel.
+// A registration callback may run at most once for a download session.
+func joinRequiredChannels(ctx context.Context, conn net.Conn, rw *bufio.ReadWriter, writeLine func(string) error, currentNick string, channels []string, timeout time.Duration, bot string, onAuthRequired func() error) error {
+	seen := map[string]bool{}
+	registrationAttempted := false
+	for _, channel := range channels {
+		channel = strings.TrimSpace(channel)
+		key := strings.ToLower(channel)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		err := waitForChannelJoins(ctx, conn, rw, writeLine, currentNick, []string{channel}, timeout, bot)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, ErrIRCRegisteredNickRequired) || registrationAttempted || onAuthRequired == nil {
+			return err
+		}
+		registrationAttempted = true
+		if err := onAuthRequired(); err != nil {
+			return err
+		}
+		if err := waitForChannelJoins(ctx, conn, rw, writeLine, currentNick, []string{channel}, timeout, bot); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1020,20 +1069,40 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 	if strings.TrimSpace(opt.Channel) != "" {
 		joinChannels = append(joinChannels, opt.Channel)
 	}
-	if err := waitForChannelJoins(ctx, conn, rw, writeLine, currentNick, joinChannels, opt.IRCHandshakeTimeout, opt.Bot); err != nil {
+	var onJoinAuthRequired func() error
+	if autoRegistrationAllowed(opt, host) {
+		onJoinAuthRequired = func() error {
+			autoRegisterTried = true
+			autoRegisteredPassword = opt.RegistrationPassword
+			if autoRegisteredPassword == "" {
+				var err error
+				autoRegisteredPassword, err = generateRegistrationPassword()
+				if err != nil {
+					return fmt.Errorf("nickserv register failed: cannot generate credentials: %w", err)
+				}
+			}
+			if err := performNickServHandshake(ctx, conn, rw, host, opt.RegistrationEmail, autoRegisteredPassword, nil); err != nil {
+				return fmt.Errorf("nickserv register failed: %w", err)
+			}
+			autoRegisterSucceeded = true
+			markAutoRegistered(opt, currentNick, autoRegisteredPassword, &autoRegisteredPersisted, &autoRegisterSucceeded, host)
+			return nil
+		}
+	}
+	if err := joinRequiredChannels(ctx, conn, rw, writeLine, currentNick, joinChannels, opt.IRCHandshakeTimeout, opt.Bot, onJoinAuthRequired); err != nil {
 		return nil, prog, err
 	}
 	if err := writeLine(ircRequestLine(opt)); err != nil {
 		return nil, prog, fmt.Errorf("xdcc_request_send_failed: %w", err)
 	}
-	log.Printf("IRC download request sent: bot=%s method=%s target=%s package=%d", opt.Bot, opt.DownloadMethod, opt.CommandTarget, opt.Package)
+	ircDebugf("IRC download request sent: bot=%s method=%s target=%s package=%d", opt.Bot, opt.DownloadMethod, opt.CommandTarget, opt.Package)
 	offerTimeout := opt.OfferTimeout
 	if offerTimeout <= 0 {
 		offerTimeout = 120 * time.Second
 	}
 	wait := newIRCOfferWait(time.Now(), offerTimeout)
 	offerDeadline := wait.deadline
-	log.Printf("XDCC request sent: awaiting DCC offer (timeout=%s, state=%s)", offerTimeout, wait.state())
+	ircDebugf("XDCC request sent: awaiting DCC offer (timeout=%s, state=%s)", offerTimeout, wait.state())
 	lastOfferMessage := ""
 	for {
 		if !time.Now().Before(offerDeadline) {
@@ -1079,16 +1148,20 @@ func runXDCCSession(ctx context.Context, opt XDCCOptions, destPath string, bytes
 					continue
 				}
 			}
-			if opt.AutoRegister && strings.TrimSpace(opt.RegistrationEmail) != "" && !autoRegisterTried && !opt.SASLEnabled && strings.TrimSpace(opt.SASLPassword) == "" && strings.TrimSpace(opt.NickServPassword) == "" {
+			if autoRegistrationAllowed(opt, host) && !autoRegisterTried {
 				autoRegisterTried = true
 				autoRegisteredPassword = opt.RegistrationPassword
 				if autoRegisteredPassword == "" {
-					autoRegisteredPassword = generateRegistrationPassword()
+					var err error
+					autoRegisteredPassword, err = generateRegistrationPassword()
+					if err != nil {
+						return nil, prog, fmt.Errorf("nickserv register failed: cannot generate credentials: %w", err)
+					}
 				}
 				log.Printf("bot requires identified nick on %s; attempting nickserv register", host)
 				if err := performNickServHandshake(ctx, conn, rw, host, opt.RegistrationEmail, autoRegisteredPassword, &offerDeadline); err != nil {
 					log.Printf("nickserv register did not succeed for %s: %v", host, err)
-					return nil, prog, joinAuthRequiredError(line)
+					return nil, prog, fmt.Errorf("nickserv register failed: %w", err)
 				}
 				autoRegisterSucceeded = true
 				markAutoRegistered(opt, currentNick, autoRegisteredPassword, &autoRegisteredPersisted, &autoRegisterSucceeded, host)

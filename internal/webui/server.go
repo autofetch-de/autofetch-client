@@ -19,6 +19,7 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/archive"
 	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/download"
 	internalirc "github.com/autofetch-de/autofetch-client/internal/irc"
 	"github.com/autofetch-de/autofetch-client/internal/localization"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
@@ -39,15 +40,16 @@ type service interface {
 }
 
 type Server struct {
-	state    *observe.State
-	service  service
-	http     *http.Server
-	addr     string
-	l        *localization.Localizer
-	bindHost string
-	lan      bool
-	accessMu sync.RWMutex
-	password []byte
+	state          *observe.State
+	service        service
+	http           *http.Server
+	addr           string
+	l              *localization.Localizer
+	bindHost       string
+	lan            bool
+	accessMu       sync.RWMutex
+	password       []byte
+	nickServManual func(context.Context, download.NickServRequest) (download.NickServResult, error)
 }
 
 func New(addr string, state *observe.State, service service, l *localization.Localizer) *Server {
@@ -71,6 +73,11 @@ func New(addr string, state *observe.State, service service, l *localization.Loc
 	mux.HandleFunc("/api/test", s.handleTest)
 	mux.HandleFunc("/api/repair", s.handleRepair)
 	mux.HandleFunc("/irc/setup", s.handleIRCSetup)
+	mux.HandleFunc("/irc/setup/register", s.handleIRCRegister)
+	mux.HandleFunc("/irc/setup/register-retry", s.handleIRCRegisterRetry)
+	mux.HandleFunc("/irc/setup/verify", s.handleIRCVerify)
+	mux.HandleFunc("/irc/setup/reset", s.handleIRCReset)
+	mux.HandleFunc("/irc/setup/unregistered", s.handleIRCUnregistered)
 	mux.HandleFunc("/settings", s.handleSettings)
 	mux.HandleFunc("/settings/webui-password", s.handleSetWebUIPassword)
 	s.http = &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,24 +136,31 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	rawSnap := s.state.Snapshot()
 	snap := s.localizeSnapshot(rawSnap)
 	network, channel := parseIRCAuthContext(rawSnap.LastError)
-	setupLink := "/irc/setup"
-	if network != "" || channel != "" {
-		v := url.Values{}
-		if network != "" {
-			v.Set("network", network)
-		}
-		if channel != "" {
-			v.Set("channel", channel)
-		}
-		setupLink += "?" + v.Encode()
-	}
-	data := map[string]any{"Title": s.l.T("web.title"), "Lang": s.l.Language(), "T": s.l.T, "Snapshot": snap, "ShowIRCAuth": strings.Contains(strings.ToLower(rawSnap.LastError), "irc_registered_nick_required"), "IRCSetupLink": setupLink, "IRCNetwork": network, "IRCChannel": channel}
+	setupLink := ircSetupLink(network, channel)
+	data := map[string]any{"Title": s.l.T("web.title"), "Lang": s.l.Language(), "T": s.l.T, "Snapshot": snap, "ShowIRCAuth": hasIRCAuthProblem(rawSnap.LastError), "IRCSetupLink": setupLink, "IRCNetwork": network, "IRCChannel": channel}
 	_ = pageTemplate.Execute(w, data)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	raw := s.state.Snapshot()
+	network, channel := parseIRCAuthContext(raw.LastError)
+	// Include structured auth diagnostics so the guide can appear while the
+	// dashboard is already open. Do not expose raw IRC messages or passwords.
+	out := struct {
+		observe.Snapshot
+		IRCAuthRequired  bool   `json:"irc_auth_required"`
+		IRCAuthNetwork   string `json:"irc_auth_network,omitempty"`
+		IRCAuthChannel   string `json:"irc_auth_channel,omitempty"`
+		IRCAuthSetupLink string `json:"irc_auth_setup_link,omitempty"`
+	}{
+		Snapshot:         s.localizeSnapshot(raw),
+		IRCAuthRequired:  hasIRCAuthProblem(raw.LastError),
+		IRCAuthNetwork:   network,
+		IRCAuthChannel:   channel,
+		IRCAuthSetupLink: ircSetupLink(network, channel),
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.localizedSnapshot())
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -583,9 +597,13 @@ func (s *Server) handleIRCSetup(w http.ResponseWriter, r *http.Request) {
 		downloadDir = strings.TrimSpace(s.service.DownloadDir())
 	}
 	ircCfg := s.service.IRCConfig().WithDefaults()
+	// WithDefaults returns a shallow copy. Never mutate its shared Networks
+	// backing array: saved NickServ/SASL secrets must survive a settings POST.
+	ircCfg.Networks = append([]config.IRCNetwork(nil), ircCfg.Networks...)
 	ircCfg.DefaultNick = strings.TrimSpace(r.FormValue("default_nick"))
-	ircCfg.AutoRegister = r.FormValue("auto_register") != ""
-	ircCfg.RegistrationEmail = strings.TrimSpace(r.FormValue("registration_email"))
+	ircCfg.AutoRegister = false // Registration requires an explicit WebUI action.
+	// The registration email is provided by the explicit NickServ form, not the network settings form.
+	// Preserve any legacy saved value instead of silently clearing it when saving a nick.
 	ircCfg.ReverseDCCEnabled = r.FormValue("reverse_dcc_enabled") != ""
 	if v, err := strconv.Atoi(strings.TrimSpace(r.FormValue("reverse_dcc_port_min"))); err == nil {
 		ircCfg.ReverseDCCPortMin = v
@@ -604,7 +622,6 @@ func (s *Server) handleIRCSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/irc/setup", http.StatusSeeOther)
 		return
 	}
-	channel := strings.TrimSpace(r.FormValue("channel"))
 	generateNick := r.FormValue("generate_nick") != ""
 	port, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("port")))
 	if port <= 0 {
@@ -632,9 +649,7 @@ func (s *Server) handleIRCSetup(w http.ResponseWriter, r *http.Request) {
 	n.Host = networkHost
 	n.Port = port
 	n.TLS = tlsEnabled
-	if channel != "" {
-		n.Channels = []string{channel}
-	}
+	// Channels are observed from server jobs; the settings form must not edit them.
 	oldNick := strings.TrimSpace(n.Nick)
 	n.Nick = strings.TrimSpace(r.FormValue("nick"))
 	n.Username = strings.TrimSpace(r.FormValue("username"))
@@ -650,14 +665,35 @@ func (s *Server) handleIRCSetup(w http.ResponseWriter, r *http.Request) {
 	n.NickServ.Command = strings.TrimSpace(r.FormValue("nickserv_command"))
 	existing := findNetworkByHost(s.service.IRCConfig().WithDefaults(), networkHost)
 	if existing != nil {
-		n.NickServ.Password = existing.NickServ.Password
+		n.NickServ.RegistrationPending = existing.NickServ.RegistrationPending && strings.EqualFold(strings.TrimSpace(existing.Nick), strings.TrimSpace(n.Nick))
+		n.NickServ.RequiresRegistration = existing.NickServ.RequiresRegistration && strings.EqualFold(strings.TrimSpace(existing.Nick), strings.TrimSpace(n.Nick))
+		// A NickServ password belongs to the registered nick, not the network.
+		// Never silently reuse it when the user selects or generates another nick.
+		n.NickServ.Password = ""
+		if strings.EqualFold(strings.TrimSpace(existing.Nick), strings.TrimSpace(n.Nick)) {
+			n.NickServ.Password = existing.NickServ.Password
+		}
 		n.SASL.Username = existing.SASL.Username
 		n.SASL.Password = existing.SASL.Password
 	}
 	if r.FormValue("clear_nickserv_password") != "" {
 		n.NickServ.Password = ""
+		n.NickServ.RegistrationPending = false
+		n.NickServ.RequiresRegistration = false
 	} else if pw := r.FormValue("nickserv_password"); pw != "" {
 		n.NickServ.Password = pw
+		n.NickServ.RegistrationPending = false // Existing account credentials.
+		n.NickServ.RequiresRegistration = false
+	}
+	if generateNick {
+		n.NickServ.RequiresRegistration = true
+		n.NickServ.RegistrationPending = false
+		n.NickServ.Enabled = false
+	}
+	if !strings.EqualFold(strings.TrimSpace(oldNick), strings.TrimSpace(n.Nick)) && n.NickServ.Password == "" {
+		n.NickServ.RequiresRegistration = true
+		n.NickServ.RegistrationPending = false
+		n.NickServ.Enabled = false
 	}
 	n.SASL.Enabled = r.FormValue("sasl_enabled") != ""
 	if r.FormValue("clear_sasl_username") != "" {
@@ -677,9 +713,6 @@ func (s *Server) handleIRCSetup(w http.ResponseWriter, r *http.Request) {
 	v := url.Values{}
 	if networkHost != "" {
 		v.Set("network", networkHost)
-	}
-	if channel != "" {
-		v.Set("channel", channel)
 	}
 	target := "/irc/setup"
 	if len(v) > 0 {
@@ -708,15 +741,9 @@ func (s *Server) renderIRCSetup(w http.ResponseWriter, r *http.Request, errMsg s
 			selected.Name = networkParam
 		}
 	}
-	if channelParam != "" {
-		selected.Channels = []string{channelParam}
-	}
-
-	channel := ""
-	if len(selected.Channels) > 0 {
-		channel = selected.Channels[0]
-	}
-	data := map[string]any{"Title": s.l.T("irc.title"), "Lang": s.l.Language(), "T": s.l.T, "Error": s.l.UserError(errMsg), "DefaultNick": ircCfg.DefaultNick, "AutoRegister": ircCfg.AutoRegister, "RegistrationEmail": ircCfg.RegistrationEmail, "ReverseDCCEnabled": ircCfg.ReverseDCCEnabled, "ReverseDCCPortMin": ircCfg.ReverseDCCPortMin, "ReverseDCCPortMax": ircCfg.ReverseDCCPortMax, "Network": selected, "Channel": channel, "Networks": ircCfg.Networks}
+	// The optional channel query parameter is context from a failed job, not
+	// an editable network setting or a replacement for observed channels.
+	data := map[string]any{"Title": s.l.T("irc.title"), "Lang": s.l.Language(), "T": s.l.T, "Error": s.l.UserError(errMsg), "DefaultNick": ircCfg.DefaultNick, "AutoRegister": ircCfg.AutoRegister, "RegistrationEmail": ircCfg.RegistrationEmail, "ReverseDCCEnabled": ircCfg.ReverseDCCEnabled, "ReverseDCCPortMin": ircCfg.ReverseDCCPortMin, "ReverseDCCPortMax": ircCfg.ReverseDCCPortMax, "Network": selected, "RequestedChannel": channelParam, "Networks": ircCfg.Networks, "Notice": r.URL.Query().Get("notice")}
 	_ = ircSetupTemplate.Execute(w, data)
 }
 
@@ -728,6 +755,28 @@ func findNetworkByHost(ircCfg config.IRCConfig, host string) *config.IRCNetwork 
 		}
 	}
 	return nil
+}
+
+func ircSetupLink(network, channel string) string {
+	values := url.Values{}
+	if network != "" {
+		values.Set("network", network)
+	}
+	if channel != "" {
+		values.Set("channel", channel)
+	}
+	if len(values) == 0 {
+		return "/irc/setup"
+	}
+	return "/irc/setup?" + values.Encode()
+}
+
+func hasIRCAuthProblem(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "irc_registered_nick_required") ||
+		strings.Contains(lower, "nickserv identify failed") ||
+		strings.Contains(lower, "nickserv register failed") ||
+		strings.Contains(lower, "sasl_auth_failed")
 }
 
 func parseIRCAuthContext(msg string) (string, string) {
@@ -806,7 +855,7 @@ var pageTemplate = template.Must(template.New("index").Parse(`<!doctype html>
       <div>{{call .T "web.last_download"}}</div><div id="last_download" class="value">—</div>
       <div>{{call .T "web.last_error"}}</div><div id="last_error" class="value">—</div>
     </div>
-    {{if .ShowIRCAuth}}<div class="warning">{{call .T "web.irc_auth_required"}} {{if .IRCNetwork}}<strong>{{.IRCNetwork}}</strong>{{end}}{{if .IRCChannel}} · {{.IRCChannel}}{{end}}<div class="actions"><a class="button secondary" href="{{.IRCSetupLink}}">{{call .T "web.open_irc_settings"}}</a></div></div>{{end}}
+    <div id="irc-auth-warning" class="warning {{if not .ShowIRCAuth}}hidden{{end}}" role="alert"><strong>{{call .T "web.irc_auth_required"}}</strong> <strong id="irc-auth-network">{{.IRCNetwork}}</strong> <span id="irc-auth-channel">{{.IRCChannel}}</span><p>{{call .T "web.irc_auth_instructions"}}</p><div class="actions"><a id="irc-auth-setup-link" class="button secondary" href="{{.IRCSetupLink}}">{{call .T "web.open_irc_settings"}}</a></div></div>
     <div class="actions">
       <button class="primary" onclick="action('/api/start')">{{call .T "web.start"}}</button>
       <button class="secondary" onclick="action('/api/stop')">{{call .T "web.stop"}}</button>
@@ -858,6 +907,14 @@ function updateView(s){
   setText('connected',s.connected?text.yes:text.no);setText('running',s.running?text.yes:text.no);
   setText('server_url',s.server_url);setText('client_id',s.client_id);setText('last_poll',s.last_poll);setText('current_job',s.current_job);
   const lastDownload=[s.last_download,s.last_download_status].filter(Boolean).join(' · ');setText('last_download',lastDownload);setText('last_error',s.last_error);
+  const authWarning=document.getElementById('irc-auth-warning');
+  authWarning.classList.toggle('hidden',!s.irc_auth_required);
+  if(s.irc_auth_required){
+    document.getElementById('irc-auth-network').textContent=s.irc_auth_network||'';
+    document.getElementById('irc-auth-channel').textContent=s.irc_auth_channel||'';
+    const target=s.irc_auth_setup_link||'/irc/setup';
+    if(target==='/irc/setup'||target.startsWith('/irc/setup?')) document.getElementById('irc-auth-setup-link').href=target;
+  }
   if(!logSelecting&&!window.getSelection().toString())logs.textContent=(s.logs||[]).join('\n');
 }
 // All filenames, paths and server-derived values enter the DOM using textContent.
@@ -1010,5 +1067,216 @@ input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5d
 </form></div></div></body></html>`))
 
 var ircSetupTemplate = template.Must(template.New("ircsetup").Parse(`<!doctype html>
-<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}.wrap{max-width:980px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:16px 18px}label{display:block;font-size:14px;font-weight:600;margin:12px 0 6px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px}input[type=checkbox]{width:auto;margin-right:8px}.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.layout{display:grid;grid-template-columns:280px 1fr;gap:16px}.netlist{display:flex;flex-direction:column;gap:10px}.netitem{display:block;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;text-decoration:none;color:#111827;background:#fff}.netitem.active{border-color:#111827;background:#f9fafb}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:10px;padding:10px 16px;text-decoration:none;cursor:pointer;font-size:14px}.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#6b7280;margin-top:12px}.error{background:#fef2f2;color:#991b1b;padding:10px 12px;border-radius:10px;margin-bottom:12px}@media(max-width:760px){.row,.layout{grid-template-columns:1fr}}</style></head>
-<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p>{{call .T "irc.data_privacy"}}</p>{{if .Error}}<div class="error">{{.Error}}</div>{{end}}<div class="layout"><div><h2>{{call .T "irc.networks"}}</h2><div class="note">{{call .T "irc.web_networks_hint"}}</div><div class="netlist">{{range .Networks}}<a class="netitem {{if eq .Host $.Network.Host}}active{{end}}" href="/irc/setup?network={{.Host}}"><strong>{{if .Name}}{{.Name}}{{else}}{{.Host}}{{end}}</strong><small>{{.Host}}:{{.Port}}{{if .Channels}} · {{index .Channels 0}}{{end}}</small></a>{{end}}</div></div><div><form method="post" action="/irc/setup"><h2>{{call .T "irc.global_settings"}}</h2><label>{{call .T "irc.default_nick"}}</label><input name="default_nick" value="{{.DefaultNick}}"><div><label><input type="checkbox" name="auto_register" {{if .AutoRegister}}checked{{end}}>{{call .T "irc.auto_register_if_required"}}</label></div><label>{{call .T "irc.registration_email"}}</label><input type="email" name="registration_email" value="{{.RegistrationEmail}}"><h2>Reverse DCC</h2><div><label><input type="checkbox" name="reverse_dcc_enabled" {{if .ReverseDCCEnabled}}checked{{end}}>{{call .T "irc.accept_reverse_dcc"}}</label></div><div class="row"><div><label>{{call .T "irc.port_from"}}</label><input name="reverse_dcc_port_min" value="{{.ReverseDCCPortMin}}"></div><div><label>{{call .T "irc.port_to"}}</label><input name="reverse_dcc_port_max" value="{{.ReverseDCCPortMax}}"></div></div><p class="note">{{call .T "irc.reverse_dcc_web_hint"}}</p><h2>{{call .T "irc.network"}}</h2><div class="row"><div><label>{{call .T "irc.display_name"}}</label><input name="name" value="{{.Network.Name}}"></div><div><label>{{call .T "irc.host"}}</label><input name="host" value="{{.Network.Host}}"></div></div><div class="row"><div><label>{{call .T "irc.channel"}}</label><input name="channel" value="{{.Channel}}"></div><div><label>{{call .T "irc.port"}}</label><input name="port" value="{{.Network.Port}}"></div></div><div><label><input type="checkbox" name="tls" {{if .Network.TLS}}checked{{end}}>{{call .T "irc.use_tls"}}</label></div><div class="row"><div><label>{{call .T "irc.nick"}}</label><input name="nick" value="{{.Network.Nick}}"></div><div><label>{{call .T "irc.username"}}</label><input name="username" value="{{.Network.Username}}"></div></div><label>{{call .T "irc.realname"}}</label><input name="realname" value="{{.Network.Realname}}"><h2>NickServ</h2><div><label><input type="checkbox" name="nickserv_enabled" {{if .Network.NickServ.Enabled}}checked{{end}}>{{call .T "irc.use_nickserv"}}</label></div><div class="row"><div><label>{{call .T "irc.nickserv_command"}}</label><input name="nickserv_command" value="{{.Network.NickServ.Command}}"></div><div><label>{{call .T "irc.nickserv_password"}}</label><input type="password" name="nickserv_password" placeholder="{{call .T "irc.leave_unchanged"}}"></div></div><div><label><input type="checkbox" name="clear_nickserv_password">{{call .T "action.delete_nickserv_password"}}</label></div><h2>SASL</h2><div><label><input type="checkbox" name="sasl_enabled" {{if .Network.SASL.Enabled}}checked{{end}}>{{call .T "irc.use_sasl"}}</label></div><div class="row"><div><label>{{call .T "irc.sasl_username"}}</label><input name="sasl_username" placeholder="{{call .T "irc.leave_unchanged"}}"></div><div><label>{{call .T "irc.sasl_password"}}</label><input type="password" name="sasl_password" placeholder="{{call .T "irc.leave_unchanged"}}"></div></div><div><label><input type="checkbox" name="clear_sasl_username">{{call .T "action.delete_sasl_access"}}</label></div><div><label><input type="checkbox" name="clear_sasl_password">{{call .T "action.delete_sasl_access"}}</label></div><div class="actions"><button class="secondary" type="submit" name="generate_nick" value="1">{{call .T "action.generate_nick"}}</button><button class="primary" type="submit">{{call .T "action.save"}}</button><a class="button secondary" href="/settings">{{call .T "settings.title"}}</a><a class="button secondary" href="/">{{call .T "action.back"}}</a></div></form></div></div></div></div></body></html>`))
+<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}
+.wrap{max-width:1040px;margin:24px auto;padding:0 16px}.card{background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:20px}
+.layout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:24px}.netlist{display:flex;flex-direction:column;gap:8px}
+.netitem{display:block;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;text-decoration:none;color:#111827;background:#fff;overflow-wrap:anywhere}
+.netitem.active{border-color:#111827;background:#f9fafb}.netitem small{display:block;color:#64748b;margin-top:4px}
+.step{border:1px solid #e2e8f0;border-radius:12px;padding:18px;margin-bottom:16px}.step h2{font-size:19px;margin:0 0 8px}.step-number{font-size:13px;color:#475569;font-weight:700;margin-bottom:6px}
+label{display:block;font-size:14px;font-weight:600;margin:14px 0 6px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:9px;font:inherit}
+input[type=checkbox]{width:auto;margin-right:8px}.checkbox-label{display:flex;align-items:flex-start;gap:5px;line-height:1.5;font-weight:400}.checkbox-label input{flex:none;margin-top:4px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.nick-row{display:flex;align-items:end;gap:8px}.nick-row .nick-field{flex:1;min-width:0}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.button,button{border:0;border-radius:9px;padding:10px 14px;text-decoration:none;cursor:pointer;font:inherit;font-size:14px;line-height:1.3}
+.primary{background:#111827;color:white}.secondary{background:#e5e7eb;color:#111827}.note{font-size:13px;color:#64748b;line-height:1.5;margin:8px 0}.status{border-left:3px solid #64748b;background:#f8fafc;padding:10px 12px;margin:12px 0;border-radius:6px}
+.error{background:#fef2f2;color:#991b1b;padding:12px;border-radius:9px;margin-bottom:14px;overflow-wrap:anywhere}
+details{border-top:1px solid #e2e8f0;padding:13px 0;margin-top:14px}summary{font-weight:600;cursor:pointer}details[open] summary{margin-bottom:12px}
+.registration-live{margin-top:16px;padding:14px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:10px}
+.registration-live[hidden]{display:none}
+.registration-live ol{padding-left:21px;margin:10px 0 0;max-height:280px;overflow:auto;font-size:14px;line-height:1.7;overflow-wrap:anywhere}
+.registration-live .live-warning{font-size:12px;color:#64748b}
+.registration-live .live-error{color:#991b1b;font-weight:600}
+.registration-live .live-remaining{font-weight:600;color:#334155}
+.observed-channels{display:flex;flex-wrap:wrap;gap:8px;list-style:none;padding:0}.observed-channels li{background:#f1f5f9;padding:6px 10px;border-radius:8px}
+.bottom-links{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;align-items:center}.bottom-links .button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;box-sizing:border-box}
+@media(max-width:760px){.layout,.row{grid-template-columns:1fr}.card{padding:14px}.nick-row{align-items:stretch;flex-direction:column}.nick-row button{align-self:flex-start}.step{padding:14px}}
+</style></head>
+<body><div class="wrap"><div class="card"><h1>{{.Title}}</h1><p class="note">{{call .T "irc.setup_intro_simple"}}</p><p class="note">{{call .T "irc.data_privacy"}}</p>{{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
+<div class="layout"><aside><h2>{{call .T "irc.networks"}}</h2><p class="note">{{call .T "irc.web_networks_hint"}}</p><div class="netlist">{{range .Networks}}<a class="netitem {{if eq .Host $.Network.Host}}active{{end}}" href="/irc/setup?network={{.Host}}"><strong>{{if .Name}}{{.Name}}{{else}}{{.Host}}{{end}}</strong><small>{{.Host}}:{{.Port}}</small></a>{{end}}</div></aside>
+<main>
+<section class="step" aria-labelledby="nick-step"><div class="step-number">{{call .T "irc.step_one"}}</div><h2 id="nick-step">{{call .T "irc.choose_nick_heading"}}</h2><p class="note">{{call .T "irc.choose_nick_hint"}}</p>
+<form method="post" action="/irc/setup">
+<div class="nick-row"><div class="nick-field"><label for="network-nick">{{call .T "irc.nick"}}</label><input id="network-nick" name="nick" value="{{.Network.Nick}}" autocomplete="off"></div><button class="secondary" type="submit" name="generate_nick" value="1">{{call .T "action.generate_nick"}}</button></div>
+{{if .Network.NickServ.RegistrationPending}}<p class="note">{{call .T "irc.nick_change_pending_warning"}}</p>{{end}}
+<details><summary>{{call .T "irc.advanced_connection_heading"}}</summary>
+<div class="row"><div><label>{{call .T "irc.display_name"}}</label><input name="name" value="{{.Network.Name}}"></div><div><label>{{call .T "irc.host"}}</label><input name="host" value="{{.Network.Host}}" required></div></div>
+<div class="row"><div><label>{{call .T "irc.port"}}</label><input name="port" value="{{.Network.Port}}" inputmode="numeric"></div><div><label class="checkbox-label"><input type="checkbox" name="tls" {{if .Network.TLS}}checked{{end}}>{{call .T "irc.use_tls"}}</label></div></div>
+<div class="row"><div><label>{{call .T "irc.username"}}</label><input name="username" value="{{.Network.Username}}"></div><div><label>{{call .T "irc.realname"}}</label><input name="realname" value="{{.Network.Realname}}"></div></div>
+<details><summary>{{call .T "irc.existing_credentials_heading"}}</summary>
+<p class="note">{{call .T "irc.existing_credentials_hint"}}</p><p class="note">{{call .T "irc.nickserv_setup_hint"}}</p>
+<label class="checkbox-label"><input type="checkbox" name="nickserv_enabled" {{if .Network.NickServ.Enabled}}checked{{end}}>{{call .T "irc.use_nickserv"}}</label>
+<div class="row"><div><label>{{call .T "irc.nickserv_command"}}</label><input name="nickserv_command" value="{{.Network.NickServ.Command}}"></div><div><label>{{call .T "irc.nickserv_password"}}</label><input type="password" name="nickserv_password" placeholder="{{call .T "irc.leave_unchanged"}}" autocomplete="new-password"></div></div>
+<label class="checkbox-label"><input type="checkbox" name="clear_nickserv_password">{{call .T "action.delete_nickserv_password"}}</label>
+<h3>SASL</h3><label class="checkbox-label"><input type="checkbox" name="sasl_enabled" {{if .Network.SASL.Enabled}}checked{{end}}>{{call .T "irc.use_sasl"}}</label>
+<div class="row"><div><label>{{call .T "irc.sasl_username"}}</label><input name="sasl_username" placeholder="{{call .T "irc.leave_unchanged"}}"></div><div><label>{{call .T "irc.sasl_password"}}</label><input type="password" name="sasl_password" placeholder="{{call .T "irc.leave_unchanged"}}" autocomplete="new-password"></div></div>
+<label class="checkbox-label"><input type="checkbox" name="clear_sasl_username">{{call .T "action.delete_sasl_access"}}</label>
+<label class="checkbox-label"><input type="checkbox" name="clear_sasl_password">{{call .T "action.delete_sasl_access"}}</label>
+</details>
+<details><summary>{{call .T "irc.global_settings"}}</summary>
+<label>{{call .T "irc.default_nick"}}</label><input name="default_nick" value="{{.DefaultNick}}">
+<h3>Reverse DCC</h3><label class="checkbox-label"><input type="checkbox" name="reverse_dcc_enabled" {{if .ReverseDCCEnabled}}checked{{end}}>{{call .T "irc.accept_reverse_dcc"}}</label>
+<div class="row"><div><label>{{call .T "irc.port_from"}}</label><input name="reverse_dcc_port_min" value="{{.ReverseDCCPortMin}}"></div><div><label>{{call .T "irc.port_to"}}</label><input name="reverse_dcc_port_max" value="{{.ReverseDCCPortMax}}"></div></div><p class="note">{{call .T "irc.reverse_dcc_web_hint"}}</p>
+</details>
+</details>
+<div class="actions"><button class="primary" type="submit">{{call .T "irc.save_identity_button"}}</button></div>
+</form></section>
+<section class="step" aria-labelledby="register-step"><div class="step-number">{{call .T "irc.step_two"}}</div><h2 id="register-step">{{call .T "irc.manual_heading"}}</h2><p class="note">{{call .T "irc.auto_register_rules_hint"}}</p>
+<div class="registration-live" id="nickserv-live" role="status" aria-live="polite" aria-atomic="false" hidden
+ data-starting="{{call .T "irc.live_starting"}}" data-connecting="{{call .T "irc.live_connecting"}}"
+ data-connected="{{call .T "irc.live_connected"}}" data-ready="{{call .T "irc.live_ready"}}"
+ data-sent="{{call .T "irc.live_sent"}}" data-waiting="{{call .T "irc.live_waiting"}}"
+ data-retry="{{call .T "irc.live_retry"}}" data-identified="{{call .T "irc.live_identified"}}"
+ data-done="{{call .T "irc.live_done"}}" data-error="{{call .T "irc.live_error"}}"
+ data-network-reply="{{call .T "irc.live_network_reply"}}" data-remaining="{{call .T "irc.live_remaining"}}"
+ data-seconds="{{call .T "irc.live_seconds"}}" data-connection-error="{{call .T "irc.live_connection_error"}}">
+<strong>{{call .T "irc.live_heading"}}</strong><p class="note">{{call .T "irc.live_intro"}}</p>
+<ol id="nickserv-live-events"></ol><p id="nickserv-live-wait" class="live-remaining" hidden></p>
+<p class="live-warning">{{call .T "irc.live_warning"}}</p>
+<a id="nickserv-live-reload" href="/irc/setup?network={{urlquery .Network.Host}}" hidden>{{call .T "irc.live_reload"}}</a>
+</div>
+{{if eq .Notice "identified"}}<p class="status" role="status">{{call .T "irc.manual_success"}}</p>{{end}}
+{{if eq .Notice "unregistered"}}<p class="status" role="status">{{call .T "irc.manual_unregistered_notice"}}</p>{{end}}
+{{if eq .Notice "reset"}}<p class="status" role="status">{{call .T "irc.manual_reset_notice"}}</p>{{end}}
+{{if eq .Notice "pending"}}<p class="status" role="status">{{call .T "irc.manual_pending_notice"}}</p>{{end}}
+{{if not .Network.Host}}<p class="note">{{call .T "irc.save_first_hint"}}</p>
+{{else if not .Network.Nick}}<p class="note">{{call .T "irc.save_first_hint"}}</p>
+{{else if .Network.NickServ.RegistrationPending}}
+<p class="status" role="status">{{call .T "irc.manual_pending"}}</p>
+{{if .Network.NickServ.Password}}
+<p class="note">{{call .T "irc.pending_next_hint"}}</p>
+<form method="post" action="/irc/setup/verify"><input type="hidden" name="host" value="{{.Network.Host}}">
+<label for="confirm-code">{{call .T "irc.manual_code"}}</label><input id="confirm-code" name="confirmation_code" autocomplete="off" maxlength="128"><p class="note">{{call .T "irc.manual_link"}}</p>
+<div class="actions"><button type="submit" class="primary">{{call .T "irc.manual_verify"}}</button></div></form>
+{{else}}<p class="note">{{call .T "irc.pending_missing_credentials"}}</p>{{end}}
+<details><summary>{{call .T "irc.registration_problems_heading"}}</summary>
+{{if .Network.NickServ.Password}}<form method="post" action="/irc/setup/register-retry"><input type="hidden" name="host" value="{{.Network.Host}}">
+<p class="note">{{call .T "irc.manual_retry_hint"}}</p><label for="retry-email">{{call .T "irc.manual_email"}}</label><input id="retry-email" type="email" name="registration_email" value="{{.Network.RegistrationEmail}}" required autocomplete="email" maxlength="128">
+<label class="checkbox-label"><input type="checkbox" name="network_rules_ack" value="yes" required>{{call .T "irc.manual_ack"}}</label>
+<div class="actions"><button type="submit" class="secondary">{{call .T "irc.manual_retry_button"}}</button></div></form>{{end}}
+<form method="post" action="/irc/setup/reset"><input type="hidden" name="host" value="{{.Network.Host}}"><p class="note">{{call .T "irc.reset_warning"}}</p><button type="submit" class="secondary">{{call .T "irc.manual_reset"}}</button></form>
+</details>
+{{else if and .Network.NickServ.Enabled .Network.NickServ.Password}}
+<p class="status" role="status">{{call .T "irc.manual_active"}}</p><p class="note">{{call .T "irc.setup_done_hint"}}</p>
+{{else if .Network.NickServ.Password}}
+<p class="status">{{call .T "irc.credentials_present_hint"}}</p>
+{{else}}
+{{if .Network.NickServ.RequiresRegistration}}<p class="status">{{call .T "irc.manual_required"}}</p>{{end}}
+<p class="note">{{call .T "irc.register_new_intro"}}</p>
+<form method="post" action="/irc/setup/register"><input type="hidden" name="host" value="{{.Network.Host}}">
+<label for="registration-email">{{call .T "irc.manual_email"}}</label><input id="registration-email" type="email" name="registration_email" value="{{.Network.RegistrationEmail}}" required autocomplete="email" maxlength="128" placeholder="name@example.org">
+<p class="note">{{call .T "irc.registration_email_hint"}}</p>
+<label class="checkbox-label"><input type="checkbox" name="network_rules_ack" value="yes" required>{{call .T "irc.manual_ack"}}</label>
+<div class="actions"><button type="submit" class="primary">{{call .T "irc.manual_register"}}</button></div></form>
+<p class="note">{{call .T "irc.manual_rules"}}</p>
+{{if .Network.NickServ.RequiresRegistration}}<details><summary>{{call .T "irc.no_nickserv_heading"}}</summary><form method="post" action="/irc/setup/unregistered"><input type="hidden" name="host" value="{{.Network.Host}}"><p class="note">{{call .T "irc.manual_unregistered_hint"}}</p><button type="submit" class="secondary">{{call .T "irc.manual_unregistered_button"}}</button></form></details>{{end}}
+{{end}}
+</section>
+<details><summary>{{call .T "irc.job_channels_heading"}}{{if .Network.Channels}} ({{len .Network.Channels}}){{end}}</summary>
+<p class="note">{{call .T "irc.job_channels_hint"}}</p>
+{{if .Network.Channels}}<ul class="observed-channels">{{range .Network.Channels}}<li><code>{{.}}</code></li>{{end}}</ul>{{else}}<p class="note">{{call .T "irc.job_channels_empty"}}</p>{{end}}
+{{if .RequestedChannel}}<p class="note">{{call .T "irc.job_channel_context"}} <code>{{.RequestedChannel}}</code></p>{{end}}</details>
+<nav class="bottom-links" aria-label="{{call .T "irc.title"}}"><a class="button secondary" href="/settings">{{call .T "settings.title"}}</a><a class="button secondary" href="/">{{call .T "action.back"}}</a></nav>
+</main></div></div></div>
+<script>
+(function(){
+  const live=document.getElementById('nickserv-live');
+  const events=document.getElementById('nickserv-live-events');
+  const wait=document.getElementById('nickserv-live-wait');
+  const reload=document.getElementById('nickserv-live-reload');
+  if(!live || !events)return;
+  let busy=false, countdown=null;
+  function stopCountdown(){if(countdown!==null){clearInterval(countdown);countdown=null;}wait.hidden=true;}
+  function append(text,kind){
+    const li=document.createElement('li');
+    li.textContent=text;
+    if(kind==='error')li.className='live-error';
+    events.appendChild(li);
+    while(events.children.length>30)events.removeChild(events.firstChild);
+    events.scrollTop=events.scrollHeight;
+  }
+  function handle(e){
+    if(!e || typeof e.kind!=='string')return;
+    if(e.kind==='notice'){
+      append(live.dataset.networkReply+String(e.message||'').slice(0,240),'notice');
+    }else if(e.kind==='waiting'){
+      append(live.dataset.waiting,'waiting');
+      stopCountdown();
+      const initial=Math.min(90,Math.max(0,Number(e.wait_seconds)||0));
+      const until=Date.now()+initial*1000;
+      const update=function(){
+        const remaining=Math.max(0,Math.ceil((until-Date.now())/1000));
+        wait.textContent=live.dataset.remaining+' '+remaining+' '+live.dataset.seconds;
+        wait.hidden=remaining===0;
+        if(remaining===0)stopCountdown();
+      };
+      update();
+      if(initial>0)countdown=setInterval(update,1000);
+    }else if(e.kind==='error'){
+      stopCountdown();
+      append(live.dataset.error,'error');
+      if(e.message)append(String(e.message).slice(0,500),'error');
+      reload.hidden=false;
+    }else if(e.kind==='done'){
+      stopCountdown();
+      append(live.dataset.done,'done');
+      if(typeof e.location==='string' && e.location.startsWith('/irc/setup?')){
+        window.location.assign(e.location);
+      }else{reload.hidden=false;}
+    }else if(Object.prototype.hasOwnProperty.call(live.dataset,e.kind)){
+      append(live.dataset[e.kind],e.kind);
+    }
+  }
+  ['/irc/setup/register','/irc/setup/register-retry','/irc/setup/verify'].forEach(function(path){
+    document.querySelectorAll('form[action="'+path+'"]').forEach(function(form){
+      form.addEventListener('submit',async function(ev){
+        if(busy){ev.preventDefault();return;}
+        if(!window.fetch || !window.ReadableStream)return;
+        ev.preventDefault();busy=true;
+        live.hidden=false;reload.hidden=true;events.textContent='';stopCountdown();
+        live.scrollIntoView({behavior:'smooth',block:'nearest'});
+        const buttons=document.querySelectorAll('#register-step button');
+        buttons.forEach(function(button){button.disabled=true;});
+        try{
+          const resp=await fetch(form.action,{
+            method:'POST',credentials:'same-origin',cache:'no-store',
+            headers:{'Accept':'application/x-ndjson'},
+            body:new URLSearchParams(new FormData(form))
+          });
+          if(!resp.ok){
+            append(live.dataset.error,'error');
+            append((await resp.text()).slice(0,240),'error');
+            reload.hidden=false;
+            return;
+          }
+          if(!resp.body)throw new Error('HTTP stream unavailable');
+          const reader=resp.body.getReader(),decoder=new TextDecoder();
+          let buffer='',complete=false;
+          function parse(line){
+            if(!line.trim())return;
+            const event=JSON.parse(line);
+            if(event.kind==='done'||event.kind==='error')complete=true;
+            handle(event);
+          }
+          for(;;){
+            const next=await reader.read();
+            if(next.done)break;
+            buffer+=decoder.decode(next.value,{stream:true});
+            if(buffer.length>32768)throw new Error('Unexpectedly long response');
+            let i;
+            while((i=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,i);buffer=buffer.slice(i+1);parse(line);}
+          }
+          if(buffer.trim())parse(buffer);
+          if(!complete)throw new Error(live.dataset.connectionError);
+        }catch(err){
+          stopCountdown();
+          append(live.dataset.connectionError,'error');
+          reload.hidden=false;
+        }finally{
+          stopCountdown();busy=false;
+          buttons.forEach(function(button){button.disabled=false;});
+        }
+      });
+    });
+  });
+})();
+</script></body></html>`))
