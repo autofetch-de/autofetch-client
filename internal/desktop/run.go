@@ -1155,11 +1155,17 @@ func buildStatusLine(l *localization.Localizer, snap observe.Snapshot) string {
 			}
 			parts = append(parts, fmt.Sprintf("%.0f%%", pct))
 		}
-		if d.SpeedBps > 0 {
-			parts = append(parts, fmt.Sprintf("%s/s", formatBytes(int64(d.SpeedBps))))
-		}
-		if eta := l.FormatDurationSeconds(d.ETASeconds); eta != "" {
-			parts = append(parts, "ETA "+eta)
+		// 100% means the payload has been transferred; the job still needs
+		// local verification and durable completion reporting.
+		if d.Total > 0 && d.Downloaded >= d.Total {
+			parts = append(parts, l.T("status.download_finalizing"))
+		} else {
+			if d.SpeedBps > 0 {
+				parts = append(parts, fmt.Sprintf("%s/s", formatBytes(int64(d.SpeedBps))))
+			}
+			if eta := l.FormatDurationSeconds(d.ETASeconds); eta != "" {
+				parts = append(parts, "ETA "+eta)
+			}
 		}
 		return strings.Join(parts, " · ")
 	}

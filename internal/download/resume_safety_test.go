@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -124,12 +123,15 @@ func TestHTTPNoValidatorStartsFresh(t *testing.T) {
 }
 
 func TestHTTPShortTransferNeverFinalizes(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("short")) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "12")
+		w.Write([]byte("short"))
+	}))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "file")
 	_, _, err := DownloadToFile(context.Background(), server.Client(), server.URL, path, 12, 0, nil)
-	if err == nil || !strings.Contains(err.Error(), "http_size_mismatch") {
-		t.Fatalf("expected mismatch, got %v", err)
+	if err == nil {
+		t.Fatalf("expected incomplete transfer, got %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("short download finalized")

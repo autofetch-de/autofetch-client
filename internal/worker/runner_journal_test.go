@@ -16,7 +16,9 @@ import (
 	"github.com/autofetch-de/autofetch-client/internal/api"
 )
 
-// Exercise the actual worker, HTTP transfer and on-disk receipt. Each runner
+// Exercise the actual worker, HTTP transfer and on-disk receipt. In this case
+// the server-provided expected size is intentionally stale; the worker must
+// trust the complete HTTP response size and still acknowledge success. Each runner
 // gets exactly one lease, so the first process cannot accidentally consume the
 // second lease before it is stopped. After an acknowledged SUCCESS, a fresh
 // server lease of the same job must trigger a fresh download.
@@ -42,7 +44,7 @@ func TestRunnerReusesVerifiedTransferAfterRestart(t *testing.T) {
 				json.NewEncoder(w).Encode(api.LeaseResponse{Job: &api.LeasedJob{
 					JobID: "same-job", Type: "download", Lease: api.Lease{AttemptID: fmt.Sprintf("attempt-%d", n), ExpiresAt: time.Now().Add(time.Minute)},
 					Payload: api.JobPayload{Download: &api.DownloadPayload{Instruction: api.DownloadInstruction{
-						Mode: "single", VideoURL: serverURL + "/file", ExpectedSize: int64(len("test downloadable payload")), Output: &api.InstructionOutput{FilenameVideo: "file.rar"},
+						Mode: "single", VideoURL: serverURL + "/file", ExpectedSize: int64(len("test downloadable payload")) + 17, Output: &api.InstructionOutput{FilenameVideo: "file.rar"},
 					}}},
 				}})
 			} else {

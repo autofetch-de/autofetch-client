@@ -84,6 +84,16 @@ func (r *Runner) currentRuntimeConfig() clientruntime.Config {
 	}.WithDefaults()
 }
 
+// transferSpeedForDisplay hides transfer-only metrics once the payload has
+// finished transferring. Hashing, syncing and receipt writes may take longer,
+// but they must not look like an ever-slower network download.
+func transferSpeedForDisplay(speed float64, downloaded, total int64, verifying bool) float64 {
+	if verifying || (total > 0 && downloaded >= total) {
+		return 0
+	}
+	return speed
+}
+
 func (r *Runner) bandwidthLimitBytesPerSec() int64 {
 	cfg := r.currentRuntimeConfig()
 	if cfg.BandwidthLimitKiBPerSec <= 0 {
@@ -695,8 +705,11 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 			// and writing the durable completion receipt.
 			verifying.Store(true)
 			size, digest, err := hashLocalFile(jobCtx, finalPath)
+			// HTTP DownloadToFile has already checked the actual response's
+			// Content-Length/Content-Range. The job-provided expected size may
+			// be stale; rejecting it here would strand a complete media file.
 			if err == nil && (inst.Mode == "single" || inst.Mode == "") && inst.ExpectedSize > 0 && size != inst.ExpectedSize {
-				err = fmt.Errorf("download_size_mismatch: got=%d expected=%d", size, inst.ExpectedSize)
+				log.Printf("HTTP source size differs from job estimate: got=%d estimated=%d", size, inst.ExpectedSize)
 			}
 			if err == nil && size != res.Bytes {
 				err = fmt.Errorf("download_size_mismatch: received=%d actual=%d", res.Bytes, size)
@@ -757,7 +770,10 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 		if exp > 0 && emaSpeed > 0 && cur < exp {
 			eta = time.Duration(float64(exp-cur)/emaSpeed) * time.Second
 		}
-		obs.DownloadProgress(displayPath, cur, exp, emaSpeed, eta)
+		// Once all bytes have arrived (or verification has started), the
+		// remaining work is not network transfer. Never show a decaying
+		// transfer speed while hashing/syncing the finished file.
+		obs.DownloadProgress(displayPath, cur, exp, transferSpeedForDisplay(emaSpeed, cur, exp, verifying.Load()), eta)
 	}
 
 	// Best-effort heartbeat retry delays for transient network errors.
@@ -1055,8 +1071,8 @@ func (r *Runner) downloadWithHeartbeat(ctx context.Context, job *api.LeasedJob, 
 					bytesTotal := exp
 					p.BytesTotal = &bytesTotal
 				}
-				if emaSpeed > 0 {
-					sb := int64(emaSpeed)
+				if speed := transferSpeedForDisplay(emaSpeed, cur, exp, verifying.Load()); speed > 0 {
+					sb := int64(speed)
 					if sb > 0 {
 						p.SpeedBps = &sb
 					}

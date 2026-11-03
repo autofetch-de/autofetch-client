@@ -49,6 +49,7 @@
   "status.error": "Fehler · {{.Message}}",
   "status.connect_download": "Verbinden",
   "status.download": "Download",
+  "status.download_finalizing": "Datei wird abgeschlossen und geprüft …",
   "status_code.pairing_waiting": "Warte auf Bestätigung",
   "status_code.pairing_approved": "Gekoppelt",
   "status_code.pairing_expired_new_code": "Code abgelaufen, neuer Code wird erstellt",

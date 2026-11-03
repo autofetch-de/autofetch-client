@@ -49,6 +49,7 @@
   "status.error": "Error · {{.Message}}",
   "status.connect_download": "Connecting",
   "status.download": "Download",
+  "status.download_finalizing": "Finalizing and verifying file …",
   "status_code.pairing_waiting": "Waiting for approval",
   "status_code.pairing_approved": "Paired",
   "status_code.pairing_expired_new_code": "Code expired; creating a new code",

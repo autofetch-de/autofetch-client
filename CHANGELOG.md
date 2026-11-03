@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased (v1.2.2 candidate)
+## 1.2.3 - 2026-11-03
+
+### Fixed
+
+- Fix HTTP downloads failing when the file size reported by the server differs from the size estimated in the download job (e.g. MediathekView sources).
+- Recover fully downloaded HTTP partial files after an HTTP 416 response, provided the remote file size and version can be safely verified.
+- Preserve strict validation of incomplete or changed HTTP downloads to prevent corrupted files from being marked as completed.
+- Fix misleading download speed and ETA reporting after all file bytes have been received.
+
+### Improved
+
+- Show a clear "Finalizing and verifying file" status in the desktop GUI while completed downloads undergo final processing.
+- Suppress artificial speed decay during file synchronization and verification, including in progress heartbeats sent to the server.
+
+## 1.2.2 - 2026-11-03
 
 ### Added
 
