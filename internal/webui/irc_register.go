@@ -11,6 +11,7 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/download"
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 func (s *Server) ircRegisterCall(ctx context.Context, req download.NickServRequest) (download.NickServResult, error) {
@@ -96,6 +97,7 @@ func (s *Server) ircRegistrationPost(w http.ResponseWriter, r *http.Request, act
 			n.NickServ.Password = pass
 			n.NickServ.Enabled = false
 			n.NickServ.RegistrationPending = true
+			n.NickServ.RegistrationStatus = nickservstate.Unconfirmed
 			n.NickServ.RequiresRegistration = true
 			// Persist before sending REGISTER, because the response may be lost.
 			if err := s.service.UpdateLocalSettings(s.service.DownloadDir(), cfg, false, cfg.RegistrationEmail); err != nil {
@@ -129,6 +131,12 @@ func (s *Server) ircRegistrationPost(w http.ResponseWriter, r *http.Request, act
 		},
 	})
 	if err != nil {
+		if out.Status == "" {
+			out.Status = nickservstate.Unconfirmed // Failed connection, no NickServ verdict.
+		}
+		if saveErr := s.saveIRCRegistrationStatus(host, n.Nick, n.NickServ.Password, out.Status); saveErr != nil {
+			log.Printf("NickServ status persistence failed for %q: %v", host, saveErr)
+		}
 		// Keep the generated credential and pending state. Show the existing
 		// verification controls instead of replacing the UI with an error page.
 		// The download layer has already redacted any NickServ notice.
@@ -143,7 +151,7 @@ func (s *Server) ircRegistrationPost(w http.ResponseWriter, r *http.Request, act
 		updated := s.service.IRCConfig().WithDefaults()
 		updated.Networks = append([]config.IRCNetwork(nil), updated.Networks...)
 		current := findNetworkByHost(updated, host)
-		if current == nil || !strings.EqualFold(current.Nick, n.Nick) {
+		if current == nil || !strings.EqualFold(current.Nick, n.Nick) || current.NickServ.Password != n.NickServ.Password || !current.NickServ.RegistrationPending {
 			if stream != nil {
 				stream.event("error", "network changed during verification", "", 0)
 			} else {
@@ -155,6 +163,7 @@ func (s *Server) ircRegistrationPost(w http.ResponseWriter, r *http.Request, act
 		current.NickServ.RequiresRegistration = false
 		current.NickServ.Enabled = true
 		current.NickServ.Command = "IDENTIFY"
+		current.NickServ.RegistrationStatus = nickservstate.Identified
 		if err := s.service.UpdateLocalSettings(s.service.DownloadDir(), updated, false, updated.RegistrationEmail); err != nil {
 			if stream != nil {
 				stream.event("error", "could not save verified identity", "", 0)
@@ -171,10 +180,22 @@ func (s *Server) ircRegistrationPost(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 	if out.Pending {
+		if saveErr := s.saveIRCRegistrationStatus(host, n.Nick, n.NickServ.Password, out.Status); saveErr != nil {
+			if stream != nil {
+				stream.event("error", "registration status could not be saved; credentials remain stored", "", 0)
+			} else {
+				http.Error(w, "registration status could not be saved", http.StatusInternalServerError)
+			}
+			return
+		}
+		notice := string(out.Status)
+		if notice == "" {
+			notice = "pending" // Backward-compatible injected exchanges in tests.
+		}
 		if stream != nil {
-			stream.event("done", "", registrationRedirectURL(host, "pending"), 0)
+			stream.event("done", "", registrationRedirectURL(host, notice), 0)
 		} else {
-			s.redirectIRCRegistration(w, r, host, "pending")
+			s.redirectIRCRegistration(w, r, host, notice)
 		}
 		return
 	}
@@ -183,6 +204,26 @@ func (s *Server) ircRegistrationPost(w http.ResponseWriter, r *http.Request, act
 	} else {
 		s.renderIRCRegistrationError(w, r, host, "No confirmation received from NickServ. Return to IRC setup and use Verify for the saved nick; do not register again.")
 	}
+}
+
+// Only the status field is updated after a manual exchange, and only if the
+// original identity is still pending. Never overwrite concurrent credential
+// changes or silently activate an unverified nick.
+func (s *Server) saveIRCRegistrationStatus(host, nick, password string, status nickservstate.Status) error {
+	if status == "" {
+		return nil
+	}
+	cfg := s.service.IRCConfig().WithDefaults()
+	cfg.Networks = append([]config.IRCNetwork(nil), cfg.Networks...)
+	current := findNetworkByHost(cfg, host)
+	if current == nil || !strings.EqualFold(current.Nick, nick) || current.NickServ.Password != password || !current.NickServ.RegistrationPending {
+		return errors.New("NickServ credentials changed during network exchange")
+	}
+	if current.NickServ.RegistrationStatus == status {
+		return nil
+	}
+	current.NickServ.RegistrationStatus = status
+	return s.service.UpdateLocalSettings(s.service.DownloadDir(), cfg, false, cfg.RegistrationEmail)
 }
 
 func (s *Server) renderIRCRegistrationError(w http.ResponseWriter, r *http.Request, host, message string) {
@@ -235,6 +276,7 @@ func (s *Server) handleIRCReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.NickServ.RegistrationPending = false
+	n.NickServ.RegistrationStatus = ""
 	n.NickServ.RequiresRegistration = true
 	n.NickServ.Enabled = false
 	n.NickServ.Password = ""

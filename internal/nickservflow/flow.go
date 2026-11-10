@@ -12,6 +12,7 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/download"
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 type Settings interface {
@@ -45,6 +46,7 @@ type Result struct {
 	Pending      bool
 	Reset        bool
 	Unregistered bool
+	Status       nickservstate.Status
 }
 type Exchange func(context.Context, download.NickServRequest) (download.NickServResult, error)
 
@@ -58,7 +60,8 @@ func findNetwork(cfg *config.IRCConfig, host string) *config.IRCNetwork {
 }
 
 func Run(ctx context.Context, s Settings, req Request, exchange Exchange) (Result, error) {
-	if exchange == nil {
+	manualExchange := exchange == nil
+	if manualExchange {
 		exchange = download.ManualNickServ
 	}
 	if req.Host == "" || req.Nick == "" {
@@ -80,6 +83,7 @@ func Run(ctx context.Context, s Settings, req Request, exchange Exchange) (Resul
 		n.NickServ.Enabled = false
 		n.NickServ.RequiresRegistration = true
 		n.NickServ.RegistrationPending = false
+		n.NickServ.RegistrationStatus = ""
 		if err := persist(); err != nil {
 			return Result{}, fmt.Errorf("save NickServ reset: %w", err)
 		}
@@ -91,6 +95,7 @@ func Run(ctx context.Context, s Settings, req Request, exchange Exchange) (Resul
 		n.NickServ.Enabled = false
 		n.NickServ.RequiresRegistration = false
 		n.NickServ.Password = ""
+		n.NickServ.RegistrationStatus = ""
 		if err := persist(); err != nil {
 			return Result{}, fmt.Errorf("save unregistered identity: %w", err)
 		}
@@ -121,6 +126,7 @@ func Run(ctx context.Context, s Settings, req Request, exchange Exchange) (Resul
 			n.NickServ.Password = password
 			n.NickServ.Enabled = false
 			n.NickServ.RegistrationPending = true
+			n.NickServ.RegistrationStatus = nickservstate.Unconfirmed
 			n.NickServ.RequiresRegistration = true
 			// Save before REGISTER: a lost server response must not lose the credential.
 			if err := persist(); err != nil {
@@ -152,8 +158,28 @@ func Run(ctx context.Context, s Settings, req Request, exchange Exchange) (Resul
 		action = download.NickServConfirm
 	}
 	outcome, err := exchange(ctx, download.NickServRequest{Host: n.Host, Port: n.Port, Nick: n.Nick, Password: n.NickServ.Password, Email: strings.TrimSpace(req.Email), Code: strings.TrimSpace(req.Code), Action: action, OnProgress: req.OnProgress})
+	if manualExchange && err != nil && outcome.Status == "" {
+		outcome.Status = nickservstate.Unconfirmed // TLS/handshake failure; no server verdict.
+	}
+	// A failed/ambiguous network exchange must never discard the password.
+	// Only explicitly reported evidence changes the durable UI status. Re-read
+	// settings first so a concurrent nick/password edit is never overwritten.
+	if outcome.Status != "" && !outcome.Identified {
+		latest := s.IRCConfig().WithDefaults()
+		latest.Networks = append([]config.IRCNetwork(nil), latest.Networks...)
+		selected := findNetwork(&latest, req.Host)
+		if selected == nil || !strings.EqualFold(selected.Nick, req.Nick) || !selected.NickServ.RegistrationPending || selected.NickServ.Password != n.NickServ.Password {
+			return Result{}, errors.New("network credentials changed during NickServ action; reopen settings")
+		}
+		if selected.NickServ.RegistrationStatus != outcome.Status {
+			selected.NickServ.RegistrationStatus = outcome.Status
+			if saveErr := s.UpdateLocalSettings(s.DownloadDir(), latest, false, latest.RegistrationEmail); saveErr != nil {
+				return Result{}, fmt.Errorf("save NickServ registration status: %w", saveErr)
+			}
+		}
+	}
 	if err != nil {
-		return Result{}, err
+		return Result{Status: outcome.Status}, err
 	}
 	if outcome.Identified {
 		// Re-read after the network request; never overwrite a nick changed while
@@ -168,13 +194,14 @@ func Run(ctx context.Context, s Settings, req Request, exchange Exchange) (Resul
 		selected.NickServ.RequiresRegistration = false
 		selected.NickServ.Enabled = true
 		selected.NickServ.Command = "IDENTIFY"
+		selected.NickServ.RegistrationStatus = nickservstate.Identified
 		if err := s.UpdateLocalSettings(s.DownloadDir(), latest, false, latest.RegistrationEmail); err != nil {
 			return Result{}, fmt.Errorf("save verified NickServ identity: %w", err)
 		}
-		return Result{Identified: true}, nil
+		return Result{Identified: true, Status: nickservstate.Identified}, nil
 	}
 	if outcome.Pending {
-		return Result{Pending: true}, nil
+		return Result{Pending: true, Status: outcome.Status}, nil
 	}
 	return Result{}, errors.New("NickServ did not confirm registration; check its notices and verify the saved nick")
 }

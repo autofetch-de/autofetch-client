@@ -16,8 +16,8 @@ Every release contains two fixed-language variants built from the same source co
 Choose the language suffix when downloading a release, for example:
 
 ```text
-autofetch-gui-windows-amd64-en-v1.2.1.exe
-autofetch-headless-linux-arm64-de-v1.2.1
+autofetch-gui-windows-amd64-en-v1.2.4.exe
+autofetch-headless-linux-arm64-de-v1.2.4
 ```
 
 The language does not affect API paths, configuration keys, technical error codes or log terminology. Technical logs remain in English so support information stays consistent across both builds.
@@ -128,7 +128,7 @@ The build language is not stored in the configuration. It is compiled into the s
 Install the selected headless binary under a stable local filename:
 
 ```bash
-sudo install -m 0755 autofetch-headless-linux-amd64-en-v1.2.1 /usr/local/bin/autofetch
+sudo install -m 0755 autofetch-headless-linux-amd64-en-v1.2.4 /usr/local/bin/autofetch
 ```
 
 Create `/etc/systemd/system/autofetch.service`:

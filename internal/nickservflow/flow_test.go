@@ -8,6 +8,7 @@ import (
 
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/download"
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 type fakeSettings struct {
@@ -149,5 +150,50 @@ func TestRegistrationEmailBelongsToSelectedNetwork(t *testing.T) {
 	})
 	if err == nil || f.cfg.Networks[0].RegistrationEmail != "revised@example.org" || f.cfg.Networks[0].NickServ.Password == "" || f.cfg.Networks[1].NickServ.Password != "other-password" {
 		t.Fatalf("retry lost network-specific settings: %+v err=%v", f.cfg.Networks, err)
+	}
+}
+
+func TestRegisterPersistsExplicitConfirmationStatusAndPassword(t *testing.T) {
+	f := makeSettings()
+	result, err := Run(context.Background(), f, request(Register), func(_ context.Context, r download.NickServRequest) (download.NickServResult, error) {
+		return download.NickServResult{Pending: true, Status: nickservstate.AwaitingConfirmation}, nil
+	})
+	n := f.cfg.Networks[0]
+	if err != nil || result.Status != nickservstate.AwaitingConfirmation || !n.NickServ.RegistrationPending ||
+		n.NickServ.RegistrationStatus != nickservstate.AwaitingConfirmation || len(n.NickServ.Password) != 18 {
+		t.Fatalf("confirmation status or saved credentials lost: result=%+v err=%v state=%+v", result, err, n.NickServ)
+	}
+	if f.saved != 2 { // credentials first, confirmation status only after network reply
+		t.Fatalf("expected persisted states before and after response, got %d", f.saved)
+	}
+}
+
+func TestRetryPersistsRejectionWithoutDroppingSavedCredentials(t *testing.T) {
+	f := makeSettings()
+	f.cfg.Networks[0].NickServ.Password = "saved-password"
+	f.cfg.Networks[0].NickServ.RegistrationPending = true
+	f.cfg.Networks[0].NickServ.RegistrationStatus = nickservstate.AwaitingConfirmation
+	f.cfg.Networks[0].RegistrationEmail = "user@example.org"
+	out, err := Run(context.Background(), f, request(Retry), func(_ context.Context, r download.NickServRequest) (download.NickServResult, error) {
+		return download.NickServResult{Status: nickservstate.Failed}, errors.New("NickServ rejected registration")
+	})
+	n := f.cfg.Networks[0]
+	if err == nil || out.Status != nickservstate.Failed || n.NickServ.RegistrationStatus != nickservstate.Failed ||
+		n.NickServ.Password != "saved-password" || !n.NickServ.RegistrationPending || f.saved != 1 {
+		t.Fatalf("failed retry overwrote credentials: out=%+v err=%v status=%+v writes=%d", out, err, n.NickServ, f.saved)
+	}
+}
+
+func TestVerifySuccessClearsPendingButRetainsPasswordAndSuccessfulStatus(t *testing.T) {
+	f := makeSettings()
+	f.cfg.Networks[0].NickServ.Password = "original-password"
+	f.cfg.Networks[0].NickServ.RegistrationPending = true
+	f.cfg.Networks[0].NickServ.RegistrationStatus = nickservstate.AwaitingConfirmation
+	_, err := Run(context.Background(), f, request(Verify), func(_ context.Context, r download.NickServRequest) (download.NickServResult, error) {
+		return download.NickServResult{Identified: true, Status: nickservstate.Identified}, nil
+	})
+	n := f.cfg.Networks[0]
+	if err != nil || n.NickServ.RegistrationPending || !n.NickServ.Enabled || n.NickServ.Password != "original-password" || n.NickServ.RegistrationStatus != nickservstate.Identified {
+		t.Fatalf("verified credentials or state wrong: %v %+v", err, n.NickServ)
 	}
 }

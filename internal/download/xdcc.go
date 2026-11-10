@@ -468,17 +468,18 @@ func nickServText(line string) string {
 }
 
 func isNickServSource(line string) bool {
-	prefix, command, trailing := parseIRCLine(line)
-	source := ircPrefixNick(prefix)
-	low := strings.ToLower(strings.TrimSpace(line))
-	trail := strings.ToLower(strings.TrimSpace(trailing))
-	if source == "nickserv" || source == "services" || source == "service" || source == "atheme" || strings.Contains(source, "nickserv") {
-		return true
+	prefix, command, _ := parseIRCLine(line)
+	// Never infer the sender from text containing "NickServ". In particular,
+	// IRC server numerics and general server notices are not service responses.
+	if command != "NOTICE" && command != "PRIVMSG" {
+		return false
 	}
-	if command == "NOTICE" && (strings.Contains(trail, "nickserv") || strings.Contains(low, " nickserv ")) {
+	switch ircPrefixNick(prefix) {
+	case "nickserv", "services", "service", "atheme":
 		return true
+	default:
+		return false
 	}
-	return strings.Contains(low, "nickserv")
 }
 
 func isNickServRegisterSuccess(line string) bool {
@@ -552,7 +553,16 @@ func isNickServRegisterFailure(line string) bool {
 		strings.Contains(l, "cannot register") ||
 		strings.Contains(l, "not enough parameters") ||
 		strings.Contains(l, "too many registrations") ||
-		strings.Contains(l, "email address is invalid")
+		strings.Contains(l, "email address is invalid") ||
+		strings.Contains(l, "registration is disabled") ||
+		strings.Contains(l, "registrations are disabled") ||
+		strings.Contains(l, "registration is not allowed") ||
+		strings.Contains(l, "registration is not permitted") ||
+		strings.Contains(l, "you may not register") ||
+		strings.Contains(l, "too many accounts") ||
+		strings.Contains(l, "email address already in use") ||
+		strings.Contains(l, "invalid confirmation code") ||
+		strings.Contains(l, "confirmation code is invalid")
 }
 
 func isNickServIdentifySuccess(line string) bool {
@@ -567,6 +577,39 @@ func isNickServIdentifySuccess(line string) bool {
 		strings.Contains(l, "successfully identified") ||
 		strings.Contains(l, "successfully logged in") ||
 		strings.Contains(l, "you are now logged in as")
+}
+
+// Confirmation is pending only if NickServ *affirmatively* instructs the
+// user to complete an email/code step. A help line mentioning "email" is not
+// evidence that a registration request was accepted.
+func isNickServConfirmationPending(line string) bool {
+	if !isNickServSource(line) {
+		return false
+	}
+	l := nickServText(line)
+	if strings.Contains(l, "awaiting confirmation") || strings.Contains(l, "pending confirmation") ||
+		strings.Contains(l, "awaiting activation") || strings.Contains(l, "pending activation") {
+		return true
+	}
+	if strings.Contains(l, "email") || strings.Contains(l, "e-mail") || strings.Contains(l, "inbox") {
+		instruction := strings.Contains(l, "please ") || strings.Contains(l, "must ") ||
+			strings.Contains(l, "need to ") || strings.Contains(l, "required to ") ||
+			strings.HasPrefix(l, "check your email") || strings.HasPrefix(l, "check your e-mail")
+		if instruction && (strings.Contains(l, "check your email") || strings.Contains(l, "check your e-mail") ||
+			strings.Contains(l, "check your inbox") || strings.Contains(l, "verify your email") ||
+			strings.Contains(l, "confirm your email") || strings.Contains(l, "activate your account")) {
+			return true
+		}
+		if (strings.Contains(l, "sent") || strings.Contains(l, "dispatched")) &&
+			(strings.Contains(l, "confirm") || strings.Contains(l, "verif") || strings.Contains(l, "activat") ||
+				strings.Contains(l, "registration") || strings.Contains(l, "register")) {
+			return true
+		}
+	}
+	return strings.Contains(l, "confirmation code has been sent") ||
+		strings.Contains(l, "confirmation code was sent") ||
+		strings.Contains(l, "you must confirm your registration") ||
+		strings.Contains(l, "you need to confirm your registration")
 }
 
 func nickServRegisterWait(line string) (time.Duration, bool) {

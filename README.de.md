@@ -16,8 +16,8 @@ Jedes Release enthält zwei festsprachige Varianten, die aus derselben Codebasis
 Beim Download wird die Variante anhand des Sprachsuffixes ausgewählt, zum Beispiel:
 
 ```text
-autofetch-gui-windows-amd64-de-v1.2.1.exe
-autofetch-headless-linux-arm64-en-v1.2.1
+autofetch-gui-windows-amd64-de-v1.2.4.exe
+autofetch-headless-linux-arm64-en-v1.2.4
 ```
 
 Die Sprache ändert keine API-Pfade, Konfigurationsschlüssel, technischen Fehlercodes oder Protokollbegriffe. Technische Logs bleiben in beiden Varianten Englisch, damit Supportinformationen vergleichbar bleiben.
@@ -129,7 +129,7 @@ Die Sprache wird nicht in der Konfiguration gespeichert. Sie ist fest in die gew
 Die gewählte Binärdatei unter einem stabilen lokalen Namen installieren:
 
 ```bash
-sudo install -m 0755 autofetch-headless-linux-amd64-de-v1.2.1 /usr/local/bin/autofetch
+sudo install -m 0755 autofetch-headless-linux-amd64-de-v1.2.4 /usr/local/bin/autofetch
 ```
 
 `/etc/systemd/system/autofetch.service` anlegen:

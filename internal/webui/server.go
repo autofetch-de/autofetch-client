@@ -666,6 +666,11 @@ func (s *Server) handleIRCSetup(w http.ResponseWriter, r *http.Request) {
 	existing := findNetworkByHost(s.service.IRCConfig().WithDefaults(), networkHost)
 	if existing != nil {
 		n.NickServ.RegistrationPending = existing.NickServ.RegistrationPending && strings.EqualFold(strings.TrimSpace(existing.Nick), strings.TrimSpace(n.Nick))
+		if strings.EqualFold(strings.TrimSpace(existing.Nick), strings.TrimSpace(n.Nick)) {
+			n.NickServ.RegistrationStatus = existing.NickServ.RegistrationStatus
+		} else {
+			n.NickServ.RegistrationStatus = ""
+		}
 		n.NickServ.RequiresRegistration = existing.NickServ.RequiresRegistration && strings.EqualFold(strings.TrimSpace(existing.Nick), strings.TrimSpace(n.Nick))
 		// A NickServ password belongs to the registered nick, not the network.
 		// Never silently reuse it when the user selects or generates another nick.
@@ -678,19 +683,29 @@ func (s *Server) handleIRCSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.FormValue("clear_nickserv_password") != "" {
 		n.NickServ.Password = ""
+		n.NickServ.RegistrationStatus = ""
 		n.NickServ.RegistrationPending = false
 		n.NickServ.RequiresRegistration = false
 	} else if pw := r.FormValue("nickserv_password"); pw != "" {
 		n.NickServ.Password = pw
+		n.NickServ.RegistrationStatus = ""
 		n.NickServ.RegistrationPending = false // Existing account credentials.
 		n.NickServ.RequiresRegistration = false
 	}
+	// A saved pending attempt must never be activated by the unrelated
+	// general settings form; only a positive IDENTIFY acknowledgement may
+	// complete the manual registration flow.
+	if n.NickServ.RegistrationPending {
+		n.NickServ.Enabled = false
+	}
 	if generateNick {
+		n.NickServ.RegistrationStatus = ""
 		n.NickServ.RequiresRegistration = true
 		n.NickServ.RegistrationPending = false
 		n.NickServ.Enabled = false
 	}
 	if !strings.EqualFold(strings.TrimSpace(oldNick), strings.TrimSpace(n.Nick)) && n.NickServ.Password == "" {
+		n.NickServ.RegistrationStatus = ""
 		n.NickServ.RequiresRegistration = true
 		n.NickServ.RegistrationPending = false
 		n.NickServ.Enabled = false
@@ -1141,7 +1156,10 @@ details{border-top:1px solid #e2e8f0;padding:13px 0;margin-top:14px}summary{font
 {{if not .Network.Host}}<p class="note">{{call .T "irc.save_first_hint"}}</p>
 {{else if not .Network.Nick}}<p class="note">{{call .T "irc.save_first_hint"}}</p>
 {{else if .Network.NickServ.RegistrationPending}}
-<p class="status" role="status">{{call .T "irc.manual_pending"}}</p>
+{{if eq .Network.NickServ.RegistrationStatus "failed"}}<p class="status" role="status">{{call .T "irc.manual_status_failed"}}</p>
+{{else if eq .Network.NickServ.RegistrationStatus "awaiting_confirmation"}}<p class="status" role="status">{{call .T "irc.manual_status_awaiting"}}</p>
+{{else if eq .Network.NickServ.RegistrationStatus "registered_unverified"}}<p class="status" role="status">{{call .T "irc.manual_status_registered"}}</p>
+{{else}}<p class="status" role="status">{{call .T "irc.manual_status_unconfirmed"}}</p>{{end}}
 {{if .Network.NickServ.Password}}
 <p class="note">{{call .T "irc.pending_next_hint"}}</p>
 <form method="post" action="/irc/setup/verify"><input type="hidden" name="host" value="{{.Network.Host}}">

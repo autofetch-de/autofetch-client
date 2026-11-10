@@ -11,14 +11,16 @@ import (
 	"time"
 
 	"github.com/autofetch-de/autofetch-client/internal/localization"
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 type IRCNickServ struct {
-	RegistrationPending  bool   `json:"registration_pending,omitempty"`
-	RequiresRegistration bool   `json:"requires_registration,omitempty"`
-	Enabled              bool   `json:"enabled"`
-	Password             string `json:"password"`
-	Command              string `json:"command"`
+	RegistrationStatus   nickservstate.Status `json:"registration_status,omitempty"`
+	RegistrationPending  bool                 `json:"registration_pending,omitempty"`
+	RequiresRegistration bool                 `json:"requires_registration,omitempty"`
+	Enabled              bool                 `json:"enabled"`
+	Password             string               `json:"password"`
+	Command              string               `json:"command"`
 }
 
 type IRCSASL struct {

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.4 - 2026-11-11
+
+### Fixed
+
+- Fix manual NickServ registration and authentication in the local WebUI and desktop GUI, including strict recognition of service replies and reliable handling of delayed responses, registration retries and nickname conflicts.
+- Distinguish failed, unconfirmed, awaiting-confirmation and successfully authenticated NickServ states without treating generic server notices or email hints as successful registrations.
+- Preserve previously stored NickServ credentials and keep registration explicitly user-initiated (never automatic during downloads).
+
+### Improved
+
+- Improve desktop tray-icon contrast on dark Linux panels with light variants of the connection-status icons (green, yellow and red markers remain visible).
+- Add an optional persistent tray-menu override for dark panels whose appearance is not detected correctly from the application theme.
+
+### Tests
+
+- Add regression coverage for NickServ reply classification, state persistence and registration flows, plus tray-icon assets and settings.
+
 ## 1.2.3 - 2026-11-03
 
 ### Fixed

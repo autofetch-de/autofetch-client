@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 type NickServAction string
@@ -53,8 +55,9 @@ func (r NickServRequest) report(kind, message string, seconds int) {
 }
 
 type NickServResult struct {
-	Identified bool // Only set after a positive NickServ identification acknowledgement.
-	Pending    bool // Registration request accepted; further action may be necessary.
+	Identified bool                 // Only set after a positive NickServ identification acknowledgement.
+	Pending    bool                 // Positive registration acknowledgement; additional steps remain.
+	Status     nickservstate.Status // Evidence-based, never inferred from generic help text.
 }
 
 // NewNickServPassword generates a credential without relying on the timestamp.
@@ -165,12 +168,15 @@ func manualNickServExchangeContext(ctx context.Context, rw *bufio.ReadWriter, re
 		_, command, _ := parseIRCLine(line)
 		switch command {
 		case "001":
+			if !ircWelcomeHasNick(line, req.Nick) {
+				return NickServResult{Status: nickservstate.Failed}, errors.New("IRC server assigned a different nickname; do not register the wrong nick")
+			}
 			nickReadyAt = time.Now()
 			req.report("ready", "", 0)
-		case "433", "436", "437":
-			return NickServResult{}, errors.New("nickname is not available; choose another nick")
+		case "432", "433", "436", "437":
+			return NickServResult{Status: nickservstate.Failed}, errors.New("nickname is not available; choose another nick")
 		case "ERROR":
-			return NickServResult{}, errors.New("IRC network rejected connection")
+			return NickServResult{Status: nickservstate.Failed}, errors.New("IRC network rejected connection")
 		}
 	}
 	command := "IDENTIFY " + req.Password
@@ -184,8 +190,10 @@ func manualNickServExchangeContext(ctx context.Context, rw *bufio.ReadWriter, re
 		return NickServResult{}, err
 	}
 	req.report("sent", "", 0)
-	result := NickServResult{}
+	result := NickServResult{Status: nickservstate.Unconfirmed}
 	identifiedRequested := req.Action == NickServVerify
+	var identifyTimer *time.Timer
+	var identifyAt <-chan time.Time
 	lastNickServNotice := ""
 	var retryTimer *time.Timer
 	var retryAt <-chan time.Time
@@ -194,7 +202,24 @@ func manualNickServExchangeContext(ctx context.Context, rw *bufio.ReadWriter, re
 		if retryTimer != nil {
 			retryTimer.Stop()
 		}
+		if identifyTimer != nil {
+			identifyTimer.Stop()
+		}
 	}()
+	requestIdentify := func() error {
+		if identifiedRequested {
+			return nil
+		}
+		if err := writeIRCPrivmsg(rw, "NickServ", "IDENTIFY "+req.Password); err != nil {
+			return err
+		}
+		identifiedRequested = true
+		// REGISTER/CONFIRM was acknowledged; keep waiting briefly for an
+		// explicit IDENTIFY reply instead of assuming login succeeded.
+		identifyTimer = time.NewTimer(8 * time.Second)
+		identifyAt = identifyTimer.C
+		return nil
+	}
 	for {
 		// A 30-second registration hold applies to the *current IRC session*,
 		// not wall-clock time between HTTP requests. Keep the same connection
@@ -202,6 +227,11 @@ func manualNickServExchangeContext(ctx context.Context, rw *bufio.ReadWriter, re
 		// registration, without generating another nick or password.
 		select {
 		case <-ctx.Done():
+			return result, unconfirmedNickServError(lastNickServNotice)
+		case <-identifyAt:
+			if result.Pending {
+				return result, nil // Registered, but sign-in was not confirmed.
+			}
 			return result, unconfirmedNickServError(lastNickServNotice)
 		case <-retryAt:
 			retryAt = nil
@@ -223,7 +253,20 @@ func manualNickServExchangeContext(ctx context.Context, rw *bufio.ReadWriter, re
 				_ = writeIRCLine(rw, "PONG "+strings.TrimSpace(strings.TrimPrefix(line, "PING ")))
 				continue
 			}
-			if !isNickServSource(line) {
+			_, ircCommand, ircTrailing := parseIRCLine(line)
+			switch ircCommand {
+			case "432", "433", "436", "437":
+				result.Status = nickservstate.Failed
+				return result, errors.New("nickname is no longer available; registration was not completed")
+			case "ERROR":
+				return result, unconfirmedNickServError(lastNickServNotice)
+			case "NICK":
+				if !strings.EqualFold(strings.TrimPrefix(ircTrailing, ":"), req.Nick) {
+					result.Status = nickservstate.Failed
+					return result, errors.New("IRC nickname changed during registration; saved credentials were preserved")
+				}
+			}
+			if !isNickServSource(line) || !isNickServReplyForNick(line, req.Nick) {
 				continue
 			}
 			body := strings.ToLower(nickServText(line))
@@ -233,7 +276,8 @@ func manualNickServExchangeContext(ctx context.Context, rw *bufio.ReadWriter, re
 			}
 			if req.Action == NickServVerify && (strings.Contains(body, "isn't registered") ||
 				strings.Contains(body, "is not registered") || strings.Contains(body, "not registered")) {
-				return result, errors.New("NickServ confirms this nick is not registered. The saved credentials have not been changed; do not use Verify until registration succeeds.")
+				result.Status = nickservstate.Failed
+				return result, errors.New("NickServ confirms this nick is not registered. The saved credentials have not been changed; use explicit Retry only if registration is allowed.")
 			}
 			if req.Action == NickServRegister {
 				if wait, ok := nickServRegisterWait(line); ok &&
@@ -259,44 +303,96 @@ func manualNickServExchangeContext(ctx context.Context, rw *bufio.ReadWriter, re
 					continue
 				}
 			}
-			if isNickServIdentifySuccess(line) || body == "+r" {
+			if isNickServIdentifySuccess(line) {
 				req.report("identified", "", 0)
-				return NickServResult{Identified: true}, nil
+				return NickServResult{Identified: true, Status: nickservstate.Identified}, nil
 			}
-			if isNickServIdentifyFailure(line) || isNickServRegisterFailure(line) && !isNickServAlreadyRegistered(line) {
+			if isNickServIdentifyFailure(line) {
+				if result.Pending {
+					// Registration was acknowledged; IDENTIFY failure alone
+					// does not prove that registration failed.
+					return result, fmt.Errorf("NickServ acknowledged registration but did not accept identification. Notice: %s", lastNickServNotice)
+				}
+				result.Status = nickservstate.Failed
+				return result, fmt.Errorf("NickServ rejected identification. Notice: %s", lastNickServNotice)
+			}
+			if isNickServRegisterFailure(line) && !isNickServAlreadyRegistered(line) {
+				result.Status = nickservstate.Failed
 				return result, fmt.Errorf("NickServ rejected the request. Notice: %s", lastNickServNotice)
 			}
 			if isNickServAlreadyRegistered(line) && req.Action == NickServRegister {
-				return result, errors.New("nick is already registered; use existing NickServ credentials")
+				// The original REGISTER may already have succeeded but its
+				// response was lost. Try the preserved password once; only
+				// a positive IDENTIFY response can establish ownership.
+				if err := requestIdentify(); err != nil {
+					return result, fmt.Errorf("NickServ identification could not be sent: %w", err)
+				}
+				continue
+			}
+			if isNickServConfirmationPending(line) {
+				result.Pending = true
+				result.Status = nickservstate.AwaitingConfirmation
+				return result, nil
 			}
 			if req.Action == NickServRegister && isNickServRegisterSuccess(line) {
 				result.Pending = true
-				if !identifiedRequested {
-					if err := writeIRCPrivmsg(rw, "NickServ", "IDENTIFY "+req.Password); err != nil {
-						return result, err
-					}
-					identifiedRequested = true
+				result.Status = nickservstate.RegisteredUnverified
+				if err := requestIdentify(); err != nil {
+					return result, fmt.Errorf("NickServ identification could not be sent: %w", err)
 				}
 				continue
 			}
-			if req.Action == NickServConfirm && (strings.Contains(body, "confirmed") || strings.Contains(body, "success") || strings.Contains(body, "verified") || strings.Contains(body, "activated")) {
+			if req.Action == NickServConfirm && isNickServConfirmSuccess(line) {
 				result.Pending = true
-				if !identifiedRequested {
-					if err := writeIRCPrivmsg(rw, "NickServ", "IDENTIFY "+req.Password); err != nil {
-						return result, err
-					}
-					identifiedRequested = true
+				result.Status = nickservstate.RegisteredUnverified
+				if err := requestIdentify(); err != nil {
+					return result, fmt.Errorf("NickServ identification could not be sent: %w", err)
 				}
 				continue
-			}
-			if strings.Contains(body, "email") || strings.Contains(body, "confirmation") || strings.Contains(body, "activate") || strings.Contains(body, "verify") || strings.Contains(body, "code") {
-				result.Pending = true
-				if req.Action == NickServRegister || req.Action == NickServConfirm {
-					return result, nil
-				}
 			}
 		}
 	}
+}
+
+// A NickServ sender alone is not enough: only replies addressed to the nick
+// accepted in this session can complete the manual action.
+func isNickServReplyForNick(line, nick string) bool {
+	fields := strings.Fields(strings.TrimSpace(line))
+	return len(fields) >= 4 && strings.HasPrefix(fields[0], ":") &&
+		strings.EqualFold(fields[2], nick)
+}
+
+// The welcome numeric's first parameter is the nickname actually accepted by
+// the server. Do not send a registration command for a fallback/renamed nick.
+func ircWelcomeHasNick(line, expected string) bool {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 3 || !strings.HasPrefix(fields[0], ":") || fields[1] != "001" {
+		return false
+	}
+	return strings.EqualFold(fields[2], expected)
+}
+
+func isNickServConfirmSuccess(line string) bool {
+	if !isNickServSource(line) {
+		return false
+	}
+	body := nickServText(line)
+	if strings.Contains(body, "not confirmed") || strings.Contains(body, "unconfirmed") ||
+		strings.Contains(body, "failed") || strings.Contains(body, "invalid") {
+		return false
+	}
+	return strings.Contains(body, "confirmation successful") ||
+		strings.Contains(body, "verification successful") ||
+		strings.Contains(body, "activation successful") ||
+		strings.Contains(body, "nickname has been confirmed") ||
+		strings.Contains(body, "your email address has been confirmed") ||
+		(strings.Contains(body, "email address") && strings.Contains(body, "has been confirmed")) ||
+		strings.Contains(body, "account has been confirmed") ||
+		strings.Contains(body, "account is now confirmed") ||
+		strings.Contains(body, "email address confirmed") ||
+		strings.Contains(body, "email has been verified") ||
+		strings.Contains(body, "account activated") ||
+		strings.Contains(body, "account is now active")
 }
 
 var nickServNoticeURL = regexp.MustCompile(`(?i)https?://[^\s]+`)

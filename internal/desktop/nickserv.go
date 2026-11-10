@@ -14,6 +14,7 @@ import (
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/download"
 	"github.com/autofetch-de/autofetch-client/internal/nickservflow"
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 // openNickServDialog uses the same audited IRC exchange as the WebUI. It does
@@ -77,7 +78,16 @@ func (v *mainView) openNickServDialog(w fyne.Window, svc *app.Service, host, nic
 			if n.NickServ.Password == "" {
 				status.SetText(v.l.T("irc.desktop.pending_no_password"))
 			} else {
-				status.SetText(v.l.T("irc.desktop.status_pending"))
+				switch n.NickServ.RegistrationStatus {
+				case nickservstate.Failed:
+					status.SetText(v.l.T("irc.manual_status_failed"))
+				case nickservstate.AwaitingConfirmation:
+					status.SetText(v.l.T("irc.manual_status_awaiting"))
+				case nickservstate.RegisteredUnverified:
+					status.SetText(v.l.T("irc.manual_status_registered"))
+				default:
+					status.SetText(v.l.T("irc.manual_status_unconfirmed"))
+				}
 			}
 		} else if n.NickServ.Enabled && n.NickServ.Password != "" {
 			status.SetText(v.l.T("irc.desktop.status_identified"))
@@ -161,7 +171,14 @@ func (v *mainView) openNickServDialog(w fyne.Window, svc *app.Service, host, nic
 				} else if result.Identified {
 					appendProgress(v.l.T("irc.desktop.success"))
 				} else if result.Pending {
-					appendProgress(v.l.T("irc.desktop.pending_next"))
+					switch result.Status {
+					case nickservstate.AwaitingConfirmation:
+						appendProgress(v.l.T("irc.manual_status_awaiting"))
+					case nickservstate.RegisteredUnverified:
+						appendProgress(v.l.T("irc.manual_status_registered"))
+					default:
+						appendProgress(v.l.T("irc.manual_status_unconfirmed"))
+					}
 				} else if result.Reset || result.Unregistered {
 					appendProgress(v.l.T("irc.desktop.saved"))
 				}

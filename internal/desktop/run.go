@@ -38,6 +38,8 @@ func Run(ctx context.Context, svc *app.Service) error {
 	w.Resize(fyneSize())
 
 	view := newMainView(w, svc)
+	view.trayLightOverride = a.Preferences().BoolWithFallback("tray.light_for_dark_panel", false)
+	view.trayThemeDark = a.Settings().ThemeVariant() == theme.VariantDark
 	w.SetContent(view.root)
 
 	quitting := false
@@ -79,6 +81,19 @@ func Run(ctx context.Context, svc *app.Service) error {
 			}
 		})
 		updateItem.Disabled = true
+		// Ubuntu's top bar may be dark even if the application reports a light theme.
+		// Keep a persisted manual override next to the automatic theme handling.
+		var menu *fyne.Menu
+		var lightTrayItem *fyne.MenuItem
+		lightTrayItem = fyne.NewMenuItem(l.T("tray.light_for_dark_panel"), func() {
+			view.trayLightOverride = !view.trayLightOverride
+			a.Preferences().SetBool("tray.light_for_dark_panel", view.trayLightOverride)
+			lightTrayItem.Checked = view.trayLightOverride
+			desk.SetSystemTrayMenu(menu)
+			view.refreshTray(svc.Snapshot())
+		})
+		lightTrayItem.Checked = view.trayLightOverride
+
 		quitItem := fyne.NewMenuItem(l.T("action.quit"), func() {
 			quitting = true
 			_ = svc.Stop()
@@ -86,7 +101,7 @@ func Run(ctx context.Context, svc *app.Service) error {
 			a.Quit()
 		})
 
-		menu := fyne.NewMenu("autofetch",
+		menu = fyne.NewMenu("autofetch",
 			openItem,
 			fyne.NewMenuItemSeparator(),
 			startItem,
@@ -94,16 +109,25 @@ func Run(ctx context.Context, svc *app.Service) error {
 			activityItem,
 			settingsItem,
 			repairPairingItem,
+			lightTrayItem,
 			fyne.NewMenuItemSeparator(),
 			versionItem,
 			updateItem,
 			quitItem,
 		)
 		view.trayApp = desk
-		desk.SetSystemTrayIcon(assets.TrayIconPending)
 		desk.SetSystemTrayMenu(menu)
 		view.updateTrayItem = updateItem
 		view.updateTrayMenu = menu
+		view.refreshTray(svc.Snapshot())
+		// Fyne notifies this listener on the app's UI goroutine.
+		a.Settings().AddListener(func(settings fyne.Settings) {
+			dark := settings.ThemeVariant() == theme.VariantDark
+			if view.trayThemeDark != dark {
+				view.trayThemeDark = dark
+				view.refreshTray(svc.Snapshot())
+			}
+		})
 	}
 
 	if err := svc.Start(); err != nil {
@@ -176,8 +200,10 @@ const (
 type mainView struct {
 	root fyne.CanvasObject
 
-	trayApp      desktopdriver.App
-	lastTrayIcon string
+	trayApp           desktopdriver.App
+	lastTrayIcon      string
+	trayThemeDark     bool
+	trayLightOverride bool
 
 	titleLabel *widget.Label
 	statusBar  *widget.Label
@@ -362,7 +388,7 @@ func (v *mainView) refreshTray(snap observe.Snapshot) {
 	if v.trayApp == nil {
 		return
 	}
-	iconKey, iconRes := trayIconForSnapshot(snap)
+	iconKey, iconRes := trayIconForSnapshot(snap, v.trayThemeDark || v.trayLightOverride)
 	if iconKey == v.lastTrayIcon {
 		return
 	}
@@ -370,23 +396,38 @@ func (v *mainView) refreshTray(snap observe.Snapshot) {
 	v.lastTrayIcon = iconKey
 }
 
-func trayIconForSnapshot(snap observe.Snapshot) (string, fyne.Resource) {
-	if !snap.Paired {
-		return "pending", assets.TrayIconPending
+func trayIconForSnapshot(snap observe.Snapshot, light bool) (string, fyne.Resource) {
+	status := "pending"
+	if snap.Paired {
+		switch {
+		case snap.ActiveDownload != nil, snap.Connected:
+			status = "okay"
+		case !snap.Running:
+			status = "pending"
+		case strings.TrimSpace(snap.LastError) != "":
+			status = "fail"
+		}
 	}
-	if snap.ActiveDownload != nil {
+	// Include appearance in the key so an OS theme change triggers a tray refresh
+	// even if the connection status has not changed.
+	if light {
+		switch status {
+		case "okay":
+			return "okay-light", assets.TrayIconOkayLight
+		case "fail":
+			return "fail-light", assets.TrayIconFailLight
+		default:
+			return "pending-light", assets.TrayIconPendingLight
+		}
+	}
+	switch status {
+	case "okay":
 		return "okay", assets.TrayIconOkay
-	}
-	if snap.Connected {
-		return "okay", assets.TrayIconOkay
-	}
-	if !snap.Running {
-		return "pending", assets.TrayIconPending
-	}
-	if strings.TrimSpace(snap.LastError) != "" {
+	case "fail":
 		return "fail", assets.TrayIconFail
+	default:
+		return "pending", assets.TrayIconPending
 	}
-	return "pending", assets.TrayIconPending
 }
 
 func (v *mainView) refreshTitle(snap observe.Snapshot) {
@@ -827,6 +868,7 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 		n.Nick = strings.TrimSpace(nickEntry.Text)
 		if !strings.EqualFold(oldNick, n.Nick) {
 			n.NickServ.Password = ""
+			n.NickServ.RegistrationStatus = ""
 			n.NickServ.Enabled = false
 			n.NickServ.RegistrationPending = false
 			n.NickServ.RequiresRegistration = true
@@ -837,10 +879,13 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 		n.RegistrationEmail = strings.TrimSpace(networkRegistrationEmail.Text)
 		n.Username = strings.TrimSpace(userEntry.Text)
 		n.Realname = strings.TrimSpace(realnameEntry.Text)
-		n.NickServ.Enabled = nickServEnabled.Checked
+		// A pending registration may only be enabled after NickServ
+		// confirms IDENTIFY, never by saving unrelated GUI settings.
+		n.NickServ.Enabled = nickServEnabled.Checked && !n.NickServ.RegistrationPending
 		n.NickServ.Command = strings.TrimSpace(nickServCommand.Text)
 		if pw := strings.TrimSpace(nickServPassword.Text); pw != "" {
 			n.NickServ.Password = pw
+			n.NickServ.RegistrationStatus = ""
 			n.NickServ.RegistrationPending = false
 			n.NickServ.RequiresRegistration = false
 		}
@@ -858,6 +903,7 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 		newNick := internalirc.GenerateDefaultNick()
 		if selected >= 0 && selected < len(networks) {
 			networks[selected].NickServ.Password = ""
+			networks[selected].NickServ.RegistrationStatus = ""
 			networks[selected].NickServ.Enabled = false
 			networks[selected].NickServ.RegistrationPending = false
 			networks[selected].NickServ.RequiresRegistration = true
@@ -884,6 +930,7 @@ func (v *mainView) openIRCSettingsDialog(w fyne.Window, svc *app.Service) {
 		if selected >= 0 && selected < len(networks) {
 			n := &networks[selected]
 			n.NickServ.Password = ""
+			n.NickServ.RegistrationStatus = ""
 			n.NickServ.Enabled = false
 			n.NickServ.RegistrationPending = false
 			n.NickServ.RequiresRegistration = true

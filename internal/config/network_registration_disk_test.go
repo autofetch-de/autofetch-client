@@ -5,13 +5,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 func TestNetworkRegistrationSavedToDiskAndRestored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "client.json")
 	original := Config{ConfigPath: path, IRC: IRCConfig{Networks: []IRCNetwork{
-		{Host: "irc.abjects.net", Port: 6697, TLS: true, Nick: "first", RegistrationEmail: "first@example.org", NickServ: IRCNickServ{Password: "private-a", RegistrationPending: true}},
-		{Host: "irc.other.net", Port: 6697, TLS: true, Nick: "second", RegistrationEmail: "second@example.org", NickServ: IRCNickServ{Password: "private-b", RegistrationPending: true}},
+		{Host: "irc.abjects.net", Port: 6697, TLS: true, Nick: "first", RegistrationEmail: "first@example.org", NickServ: IRCNickServ{Password: "private-a", RegistrationPending: true, RegistrationStatus: nickservstate.AwaitingConfirmation}},
+		{Host: "irc.other.net", Port: 6697, TLS: true, Nick: "second", RegistrationEmail: "second@example.org", NickServ: IRCNickServ{Password: "private-b", RegistrationPending: true, RegistrationStatus: nickservstate.Failed}},
 	}}}
 	if err := Persist(original); err != nil {
 		t.Fatal(err)
@@ -35,7 +37,7 @@ func TestNetworkRegistrationSavedToDiskAndRestored(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, b := restored.IRC.Networks[0], restored.IRC.Networks[1]
-	if a.RegistrationEmail != "first@example.org" || b.RegistrationEmail != "second@example.org" || a.NickServ.Password != "private-a" || b.NickServ.Password != "private-b" || !a.NickServ.RegistrationPending || !b.NickServ.RegistrationPending {
+	if a.RegistrationEmail != "first@example.org" || b.RegistrationEmail != "second@example.org" || a.NickServ.Password != "private-a" || b.NickServ.Password != "private-b" || !a.NickServ.RegistrationPending || !b.NickServ.RegistrationPending || a.NickServ.RegistrationStatus != nickservstate.AwaitingConfirmation || b.NickServ.RegistrationStatus != nickservstate.Failed {
 		t.Fatal("persist/load did not restore per-network NickServ registration")
 	}
 }

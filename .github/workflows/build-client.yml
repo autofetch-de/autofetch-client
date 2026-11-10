@@ -216,10 +216,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          APP_VERSION="$(awk -F '"' '/^Version = / {print $2}' FyneApp.toml)"
+          test -n "$APP_VERSION"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            test "$APP_VERSION" = "${GITHUB_REF_NAME#v}"
+          fi
           export PATH="$(go env GOPATH)/bin:$PATH"
           OUT="dist/${{ matrix.name }}-gui-${{ matrix.language }}"
           cd cmd/autofetch-gui
-          if [ -f ../../Icon.png ]; then fyne package -os darwin -name autofetch -release -icon ../../Icon.png; else fyne package -os darwin -name autofetch -release; fi
+          if [ -f ../../Icon.png ]; then fyne package -os darwin -name autofetch -release -appID de.autofetch.client -appVersion "$APP_VERSION" -icon ../../Icon.png; else fyne package -os darwin -name autofetch -release -appID de.autofetch.client -appVersion "$APP_VERSION"; fi
           cp "../../$OUT/autofetch-gui-${{ matrix.language }}" autofetch.app/Contents/MacOS/autofetch
           mv autofetch.app "../../$OUT/autofetch-${{ matrix.language }}.app"
           cd "../../$OUT"

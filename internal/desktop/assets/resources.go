@@ -17,15 +17,24 @@ var (
 	trayPendingSVG []byte
 	//go:embed autofetch_af_fail.svg
 	trayFailSVG []byte
+	//go:embed autofetch_af_okay_light.svg
+	trayOkayLightSVG []byte
+	//go:embed autofetch_af_pending_light.svg
+	trayPendingLightSVG []byte
+	//go:embed autofetch_af_fail_light.svg
+	trayFailLightSVG []byte
 	//go:embed app_icon.png
 	appIconPNG []byte
 )
 
 var (
-	AppIcon         = fyne.NewStaticResource("autofetch_af.svg", appIconSVG)
-	AppIconDark     = fyne.NewStaticResource("autofetch_af_dark.svg", appIconDarkSVG)
-	AppIconPNG      = fyne.NewStaticResource("app_icon.png", appIconPNG)
-	TrayIconOkay    = fyne.NewStaticResource("autofetch_af_okay.svg", trayOkaySVG)
-	TrayIconPending = fyne.NewStaticResource("autofetch_af_pending.svg", trayPendingSVG)
-	TrayIconFail    = fyne.NewStaticResource("autofetch_af_fail.svg", trayFailSVG)
+	AppIcon              = fyne.NewStaticResource("autofetch_af.svg", appIconSVG)
+	AppIconDark          = fyne.NewStaticResource("autofetch_af_dark.svg", appIconDarkSVG)
+	AppIconPNG           = fyne.NewStaticResource("app_icon.png", appIconPNG)
+	TrayIconOkay         = fyne.NewStaticResource("autofetch_af_okay.svg", trayOkaySVG)
+	TrayIconPending      = fyne.NewStaticResource("autofetch_af_pending.svg", trayPendingSVG)
+	TrayIconFail         = fyne.NewStaticResource("autofetch_af_fail.svg", trayFailSVG)
+	TrayIconOkayLight    = fyne.NewStaticResource("autofetch_af_okay_light.svg", trayOkayLightSVG)
+	TrayIconPendingLight = fyne.NewStaticResource("autofetch_af_pending_light.svg", trayPendingLightSVG)
+	TrayIconFailLight    = fyne.NewStaticResource("autofetch_af_fail_light.svg", trayFailLightSVG)
 )

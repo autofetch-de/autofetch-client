@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/autofetch-de/autofetch-client/internal/config"
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 )
 
 func setupPage(t *testing.T, state config.IRCNickServ) string {
@@ -86,6 +87,27 @@ func TestIRCSetupFooterActionsAreStyledButtons(t *testing.T) {
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("footer action missing button styling: %s", want)
+		}
+	}
+}
+
+func TestIRCSetupShowsDistinctPersistentRegistrationStatuses(t *testing.T) {
+	cases := []struct {
+		status  nickservstate.Status
+		visible string
+	}{
+		{nickservstate.Failed, "rejected the action"},
+		{nickservstate.Unconfirmed, "did not conclusively acknowledge"},
+		{nickservstate.AwaitingConfirmation, "explicitly requested an additional confirmation"},
+		{nickservstate.RegisteredUnverified, "acknowledged registration"},
+	}
+	for _, tc := range cases {
+		page := setupPage(t, config.IRCNickServ{RegistrationPending: true, RegistrationStatus: tc.status, Password: "saved-password"})
+		if !strings.Contains(page, tc.visible) || !strings.Contains(page, `action="/irc/setup/verify"`) {
+			t.Errorf("missing persisted state %s or verify controls", tc.status)
+		}
+		if strings.Contains(page, `action="/irc/setup/register"`) {
+			t.Errorf("pending status %s allowed a new registration", tc.status)
 		}
 	}
 }

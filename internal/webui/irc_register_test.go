@@ -15,6 +15,7 @@ import (
 	"github.com/autofetch-de/autofetch-client/internal/config"
 	"github.com/autofetch-de/autofetch-client/internal/download"
 	"github.com/autofetch-de/autofetch-client/internal/localization"
+	"github.com/autofetch-de/autofetch-client/internal/nickservstate"
 	"github.com/autofetch-de/autofetch-client/internal/observe"
 )
 
@@ -350,5 +351,56 @@ func TestRegistrationProgressArrivesBeforeNickServCompletes(t *testing.T) {
 	last, err := reader.ReadString('\n')
 	if err != nil || !strings.Contains(last, `"kind":"done"`) {
 		t.Fatalf("no completion after releasing exchange: %q %v", last, err)
+	}
+}
+
+func TestRegistrationPageAndStoredStatusFollowActualNickServOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		status   nickservstate.Status
+		reply    download.NickServResult
+		err      error
+		wantCode int
+	}{
+		{nickservstate.AwaitingConfirmation, download.NickServResult{Pending: true, Status: nickservstate.AwaitingConfirmation}, nil, 303},
+		{nickservstate.RegisteredUnverified, download.NickServResult{Pending: true, Status: nickservstate.RegisteredUnverified}, nil, 303},
+		{nickservstate.Failed, download.NickServResult{Status: nickservstate.Failed}, errors.New("rejected by NickServ"), 502},
+		{nickservstate.Unconfirmed, download.NickServResult{Status: nickservstate.Unconfirmed}, errors.New("outcome unconfirmed"), 502},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			srv, svc := testManualRegistrationUI(t)
+			srv.nickServManual = func(context.Context, download.NickServRequest) (download.NickServResult, error) {
+				return tc.reply, tc.err
+			}
+			rec := postRegistration(t, srv, "/irc/setup/register", "http://127.0.0.1:23324", url.Values{
+				"host": {"irc.example.net"}, "registration_email": {"person@example.org"}, "network_rules_ack": {"yes"},
+			})
+			if rec.Code != tc.wantCode {
+				t.Fatalf("wrong HTTP response: %d, body: %s", rec.Code, rec.Body.String())
+			}
+			n := svc.irc.Networks[0]
+			if !n.NickServ.RegistrationPending || n.NickServ.Password == "" || n.NickServ.Enabled || n.NickServ.RegistrationStatus != tc.status {
+				t.Fatalf("wrong durable status or credentials: %+v", n.NickServ)
+			}
+		})
+	}
+}
+
+func TestSavingIRCSettingsCannotActivatePendingNickOrLoseStatus(t *testing.T) {
+	srv, svc := testManualRegistrationUI(t)
+	svc.irc.Networks[0].NickServ = config.IRCNickServ{
+		RegistrationPending: true, RequiresRegistration: true, Password: "saved-password",
+		RegistrationStatus: nickservstate.AwaitingConfirmation,
+	}
+	form := url.Values{
+		"host": {"irc.example.net"}, "nick": {"myNick"}, "tls": {"on"},
+		"nickserv_enabled": {"on"},
+	}
+	rec := postRegistration(t, srv, "/irc/setup", "", form)
+	if rec.Code != 303 {
+		t.Fatalf("failed to save IRC settings: %d %s", rec.Code, rec.Body.String())
+	}
+	n := svc.irc.Networks[0].NickServ
+	if !n.RegistrationPending || n.RegistrationStatus != nickservstate.AwaitingConfirmation || n.Enabled || n.Password != "saved-password" {
+		t.Fatalf("general settings activated pending nick or lost credentials: %+v", n)
 	}
 }
